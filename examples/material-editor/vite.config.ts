@@ -2,10 +2,9 @@ import { defineConfig } from 'vite'
 import { resolve } from 'node:path'
 import react from '@vitejs/plugin-react'
 
-// https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
-  base: process.env.NODE_ENV === 'development' ? '/' : '/tsl-node-editor/',
+  base: process.env.NODE_ENV === 'development' ? '/' : '/tsl-node-editor/material-editor/',
   build: {
     rollupOptions: {
       input: {

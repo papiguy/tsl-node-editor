@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import './App.css'
+import { toast as baseToast, Toaster } from 'toastywave'
+import type { ToastOptions } from 'toastywave'
+import './TSLNodeEditor.css'
 import {
   AmbientLight,
   BoxGeometry,
@@ -27,6 +29,10 @@ import {
   MeshBasicNodeMaterial,
   MeshPhysicalNodeMaterial,
   MeshStandardNodeMaterial,
+  MeshToonNodeMaterial,
+  MeshPhongNodeMaterial,
+  MeshMatcapNodeMaterial,
+  MeshNormalNodeMaterial,
   WebGPURenderer,
 } from 'three/webgpu'
 import WebGPU from 'three/addons/capabilities/WebGPU.js'
@@ -34,6 +40,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js'
 import { THREEMaterialsTSLExporterPlugin } from '@takahirox/gltf-three-materials-tsl-exporter'
 import { createDefaultNodeSerializer } from './tslGltfExporter'
+import { buildExecutableTSL as buildExecutableTSLFromCodegen } from './codegen'
 import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js'
 import {
   acesFilmicToneMapping,
@@ -143,6 +150,73 @@ import {
   vec4,
   cameraViewMatrix,
   cameraProjectionMatrix,
+  blendBurn,
+  blendDodge,
+  blendScreen,
+  blendOverlay,
+  blendColor,
+  premultiplyAlpha,
+  unpremultiplyAlpha,
+  hue,
+  vibrance,
+  cdl,
+  mx_contrast,
+  mx_hsvtorgb,
+  mx_rgbtohsv,
+  oscSine,
+  oscSquare,
+  oscTriangle,
+  oscSawtooth,
+  parabola,
+  gain,
+  pcurve,
+  sinc,
+  screenUV,
+  screenSize,
+  viewportUV,
+  depth,
+  linearDepth,
+  cameraPosition,
+  cameraNear,
+  cameraFar,
+  positionWorld,
+  positionView,
+  normalWorld,
+  normalView,
+  normalFlat,
+  frontFacing,
+  faceDirection,
+  matcapUV,
+  equirectUV,
+  parallaxUV,
+  mx_rotate2d,
+  mx_cell_noise_float,
+  mx_ramplr,
+  mx_ramptb,
+  mx_ramp4,
+  mx_splitlr,
+  mx_splittb,
+  bumpMap,
+  mx_heighttonormal,
+  hash,
+  rand,
+  interleavedGradientNoise,
+  reciprocal,
+  cbrt,
+  lengthSq,
+  difference,
+  inverseSqrt,
+  mx_aastep,
+  mx_safepower,
+  shapeCircle,
+  directionToColor,
+  colorToDirection,
+  deltaTime,
+  frameId,
+  PI,
+  PI2,
+  rangeFogFactor,
+  densityFogFactor,
 } from 'three/tsl'
 
 type GraphNode = {
@@ -240,13 +314,47 @@ type PaletteItem = {
   outputs: string[]
   defaultValue?: string
 }
-type ExampleGraph = {
+export type TSLNodeEditorGraph = {
   nodes: GraphNode[]
   connections: GraphConnection[]
   groups?: GraphGroup[]
   functions?: Record<string, FunctionDefinition>
   ui?: { paletteOpen?: Record<string, boolean> }
 }
+
+export type TSLNodeEditorPreset =
+  | { name: string; description?: string; graph: TSLNodeEditorGraph }
+  | { name: string; description?: string; url: string }
+
+const getToastOptions = (options?: ToastOptions) => ({
+  ...options,
+  showCountdown: false,
+})
+
+const toast = {
+  success: (message: string, options?: Omit<ToastOptions, 'type'>) =>
+    baseToast.success(message, getToastOptions(options)),
+  error: (message: string, options?: Omit<ToastOptions, 'type'>) =>
+    baseToast.error(message, getToastOptions(options)),
+  warning: (message: string, options?: Omit<ToastOptions, 'type'>) =>
+    baseToast.warning(message, getToastOptions(options)),
+  info: (message: string, options?: Omit<ToastOptions, 'type'>) =>
+    baseToast.info(message, getToastOptions(options)),
+  loading: (message: string, options?: Omit<ToastOptions, 'type'>) =>
+    baseToast.loading(message, getToastOptions(options)),
+  promise: (
+    promise: Promise<unknown>,
+    messages: { loading: string; success: string; error: string },
+    options?: ToastOptions,
+  ) => baseToast.promise(promise, messages, getToastOptions(options)),
+  dismiss: baseToast.dismiss,
+}
+
+const isUrlPreset = (
+  preset: TSLNodeEditorPreset,
+): preset is TSLNodeEditorPreset & { url: string } => 'url' in preset
+
+type ExampleGraph = TSLNodeEditorGraph
 type GltfTextureInfo = {
   texture?: Texture | null
   scale?: Vector2
@@ -319,6 +427,25 @@ type GltfAssetEntry = {
   materials: Material[]
   meshNames: string[]
   textures: Texture[]
+}
+
+export interface TSLNodeEditorOutput {
+  tslCode: string
+  materialCode: string
+  appCode: string
+  graph: TSLNodeEditorGraph
+}
+
+export interface TSLNodeEditorProps {
+  className?: string
+  style?: React.CSSProperties
+  viewerUrl?: string
+  basisPath?: string
+  onChange?: (output: TSLNodeEditorOutput) => void
+  hideGithubLink?: boolean
+  initialGraph?: TSLNodeEditorGraph
+  disablePersistence?: boolean
+  presets?: TSLNodeEditorPreset[]
 }
 
 const buildNodeMap = (nodes: GraphNode[]): NodeMap =>
@@ -423,6 +550,97 @@ const expandFunctions = (
 }
 
 const DEFAULT_COLOR = '#4fb3c8'
+
+const EXAMPLE_GRAPH_DATA: Omit<TSLNodeEditorGraph, 'ui'> = {
+  nodes: [
+    { id: 'color-example', type: 'color', label: 'Color', x: 60, y: 120, inputs: [], outputs: ['color'], value: DEFAULT_COLOR },
+    { id: 'geometry-example', type: 'geometryPrimitive', label: 'Geometry', x: 60, y: 400, inputs: [], outputs: ['geometry'], value: 'torus' },
+    { id: 'geometry-output-example', type: 'geometryOutput', label: 'Geometry Output', x: 320, y: 460, inputs: ['geometry'], outputs: [] },
+    { id: 'time-example', type: 'time', label: 'Time', x: 60, y: 260, inputs: [], outputs: ['value'] },
+    { id: 'color-mult-example', type: 'multiply', label: 'Multiply', x: 1100, y: 200, inputs: ['a', 'b'], outputs: ['value'] },
+    { id: 'position-example', type: 'position', label: 'Position', x: 60, y: 540, inputs: [], outputs: ['value'] },
+    { id: 'length-example', type: 'length', label: 'Length', x: 320, y: 1000, inputs: ['value'], outputs: ['value'] },
+    { id: 'pos-freq-example', type: 'number', label: 'Number', x: 320, y: 1180, inputs: [], outputs: ['value'], value: '6', slider: false, updateMode: 'manual', updateSource: 'value' },
+    { id: 'pos-freq-mult-example', type: 'multiply', label: 'Multiply', x: 580, y: 940, inputs: ['a', 'b'], outputs: ['value'] },
+    { id: 'pos-speed-example', type: 'number', label: 'Number', x: 320, y: 640, inputs: [], outputs: ['value'], value: '2.5', slider: false, updateMode: 'manual', updateSource: 'value' },
+    { id: 'pos-time-mult-example', type: 'multiply', label: 'Multiply', x: 580, y: 520, inputs: ['a', 'b'], outputs: ['value'] },
+    { id: 'pos-time-neg-example', type: 'number', label: 'Number', x: 320, y: 820, inputs: [], outputs: ['value'], value: '-1', slider: false, updateMode: 'manual', updateSource: 'value' },
+    { id: 'pos-time-neg-mult-example', type: 'multiply', label: 'Multiply', x: 580, y: 660, inputs: ['a', 'b'], outputs: ['value'] },
+    { id: 'pos-phase-example', type: 'add', label: 'Add', x: 840, y: 420, inputs: ['a', 'b'], outputs: ['value'] },
+    { id: 'pos-wave-example', type: 'sine', label: 'Sine', x: 1100, y: 420, inputs: ['value'], outputs: ['value'] },
+    { id: 'pos-edge-low-example', type: 'number', label: 'Number', x: 320, y: 120, inputs: [], outputs: ['value'], value: '0.85', slider: false, updateMode: 'manual', updateSource: 'value' },
+    { id: 'pos-edge-high-example', type: 'number', label: 'Number', x: 320, y: 280, inputs: [], outputs: ['value'], value: '0.95', slider: false, updateMode: 'manual', updateSource: 'value' },
+    { id: 'pos-band-example', type: 'smoothstep', label: 'Smoothstep', x: 1360, y: 420, inputs: ['edge0', 'edge1', 'x'], outputs: ['value'] },
+    { id: 'pos-invert-mult-example', type: 'multiply', label: 'Multiply', x: 1620, y: 420, inputs: ['a', 'b'], outputs: ['value'] },
+    { id: 'pos-invert-bias-example', type: 'number', label: 'Number', x: 1620, y: 560, inputs: [], outputs: ['value'], value: '-1', slider: false, updateMode: 'manual', updateSource: 'value' },
+    { id: 'pos-invert-add-example', type: 'add', label: 'Add', x: 1880, y: 420, inputs: ['a', 'b'], outputs: ['value'] },
+    { id: 'pos-invert-one-example', type: 'number', label: 'Number', x: 1880, y: 560, inputs: [], outputs: ['value'], value: '1', slider: false, updateMode: 'manual', updateSource: 'value' },
+    { id: 'normal-example', type: 'normal', label: 'Normal', x: 60, y: 700, inputs: [], outputs: ['value'] },
+    { id: 'vert-split-example', type: 'splitVec3', label: 'Split Vec3', x: 320, y: 1360, inputs: ['value'], outputs: ['x', 'y', 'z'] },
+    { id: 'vert-length-mult-example', type: 'multiply', label: 'Multiply', x: 580, y: 1080, inputs: ['a', 'b'], outputs: ['value'] },
+    { id: 'vert-freq-example', type: 'number', label: 'Number', x: 320, y: 1540, inputs: [], outputs: ['value'], value: '3', slider: false, updateMode: 'manual', updateSource: 'value' },
+    { id: 'vert-time-mult-example', type: 'multiply', label: 'Multiply', x: 580, y: 1360, inputs: ['a', 'b'], outputs: ['value'] },
+    { id: 'vert-speed-example', type: 'number', label: 'Number', x: 320, y: 1720, inputs: [], outputs: ['value'], value: '2', slider: false, updateMode: 'manual', updateSource: 'value' },
+    { id: 'vert-phase-example', type: 'add', label: 'Add', x: 840, y: 1220, inputs: ['a', 'b'], outputs: ['value'] },
+    { id: 'vert-sine-example', type: 'sine', label: 'Sine', x: 1100, y: 1220, inputs: ['value'], outputs: ['value'] },
+    { id: 'vert-amp-example', type: 'number', label: 'Number', x: 1100, y: 1360, inputs: [], outputs: ['value'], value: '0.15', slider: false, updateMode: 'manual', updateSource: 'value' },
+    { id: 'vert-amp-mult-example', type: 'multiply', label: 'Multiply', x: 1360, y: 1220, inputs: ['a', 'b'], outputs: ['value'] },
+    { id: 'vert-normal-mult-example', type: 'multiply', label: 'Multiply', x: 1360, y: 1360, inputs: ['a', 'b'], outputs: ['value'] },
+    { id: 'vertex-output-example', type: 'vertexOutput', label: 'Vertex Output', x: 1620, y: 1280, inputs: ['position'], outputs: [] },
+    { id: 'final-mult-example', type: 'multiply', label: 'Multiply', x: 2140, y: 260, inputs: ['a', 'b'], outputs: ['value'] },
+    { id: 'roughness-example', type: 'number', label: 'Number', x: 60, y: 840, inputs: [], outputs: ['value'], value: '0.6', slider: false, updateMode: 'manual', updateSource: 'value' },
+    { id: 'metalness-example', type: 'number', label: 'Number', x: 60, y: 980, inputs: [], outputs: ['value'], value: '0.1', slider: false, updateMode: 'manual', updateSource: 'value' },
+    { id: 'output-example', type: 'output', label: 'Fragment Output', x: 2400, y: 260, inputs: ['baseColor', 'roughness', 'metalness'], outputs: [] },
+  ],
+  connections: [
+    { id: 'conn-time-speed', from: { nodeId: 'time-example', pin: 'value' }, to: { nodeId: 'pos-time-mult-example', pin: 'a' } },
+    { id: 'conn-color-mult', from: { nodeId: 'color-example', pin: 'color' }, to: { nodeId: 'color-mult-example', pin: 'a' } },
+    { id: 'conn-geometry-output', from: { nodeId: 'geometry-example', pin: 'geometry' }, to: { nodeId: 'geometry-output-example', pin: 'geometry' } },
+    { id: 'conn-position-add', from: { nodeId: 'position-example', pin: 'value' }, to: { nodeId: 'length-example', pin: 'value' } },
+    { id: 'conn-length-freq', from: { nodeId: 'length-example', pin: 'value' }, to: { nodeId: 'pos-freq-mult-example', pin: 'a' } },
+    { id: 'conn-freq-mult', from: { nodeId: 'pos-freq-example', pin: 'value' }, to: { nodeId: 'pos-freq-mult-example', pin: 'b' } },
+    { id: 'conn-speed-mult', from: { nodeId: 'pos-speed-example', pin: 'value' }, to: { nodeId: 'pos-time-mult-example', pin: 'b' } },
+    { id: 'conn-time-neg', from: { nodeId: 'pos-time-mult-example', pin: 'value' }, to: { nodeId: 'pos-time-neg-mult-example', pin: 'a' } },
+    { id: 'conn-time-neg-value', from: { nodeId: 'pos-time-neg-example', pin: 'value' }, to: { nodeId: 'pos-time-neg-mult-example', pin: 'b' } },
+    { id: 'conn-phase-add-a', from: { nodeId: 'pos-freq-mult-example', pin: 'value' }, to: { nodeId: 'pos-phase-example', pin: 'a' } },
+    { id: 'conn-phase-add-b', from: { nodeId: 'pos-time-neg-mult-example', pin: 'value' }, to: { nodeId: 'pos-phase-example', pin: 'b' } },
+    { id: 'conn-phase-sine', from: { nodeId: 'pos-phase-example', pin: 'value' }, to: { nodeId: 'pos-wave-example', pin: 'value' } },
+    { id: 'conn-band-edge0', from: { nodeId: 'pos-edge-low-example', pin: 'value' }, to: { nodeId: 'pos-band-example', pin: 'edge0' } },
+    { id: 'conn-band-edge1', from: { nodeId: 'pos-edge-high-example', pin: 'value' }, to: { nodeId: 'pos-band-example', pin: 'edge1' } },
+    { id: 'conn-band-x', from: { nodeId: 'pos-wave-example', pin: 'value' }, to: { nodeId: 'pos-band-example', pin: 'x' } },
+    { id: 'conn-invert-band', from: { nodeId: 'pos-band-example', pin: 'value' }, to: { nodeId: 'pos-invert-mult-example', pin: 'a' } },
+    { id: 'conn-invert-mult', from: { nodeId: 'pos-invert-bias-example', pin: 'value' }, to: { nodeId: 'pos-invert-mult-example', pin: 'b' } },
+    { id: 'conn-invert-add-a', from: { nodeId: 'pos-invert-mult-example', pin: 'value' }, to: { nodeId: 'pos-invert-add-example', pin: 'a' } },
+    { id: 'conn-invert-add-b', from: { nodeId: 'pos-invert-one-example', pin: 'value' }, to: { nodeId: 'pos-invert-add-example', pin: 'b' } },
+    { id: 'conn-vert-length', from: { nodeId: 'vert-split-example', pin: 'y' }, to: { nodeId: 'vert-length-mult-example', pin: 'a' } },
+    { id: 'conn-vert-split', from: { nodeId: 'position-example', pin: 'value' }, to: { nodeId: 'vert-split-example', pin: 'value' } },
+    { id: 'conn-vert-freq', from: { nodeId: 'vert-freq-example', pin: 'value' }, to: { nodeId: 'vert-length-mult-example', pin: 'b' } },
+    { id: 'conn-vert-time', from: { nodeId: 'time-example', pin: 'value' }, to: { nodeId: 'vert-time-mult-example', pin: 'a' } },
+    { id: 'conn-vert-speed', from: { nodeId: 'vert-speed-example', pin: 'value' }, to: { nodeId: 'vert-time-mult-example', pin: 'b' } },
+    { id: 'conn-vert-phase-a', from: { nodeId: 'vert-length-mult-example', pin: 'value' }, to: { nodeId: 'vert-phase-example', pin: 'a' } },
+    { id: 'conn-vert-phase-b', from: { nodeId: 'vert-time-mult-example', pin: 'value' }, to: { nodeId: 'vert-phase-example', pin: 'b' } },
+    { id: 'conn-vert-sine', from: { nodeId: 'vert-phase-example', pin: 'value' }, to: { nodeId: 'vert-sine-example', pin: 'value' } },
+    { id: 'conn-vert-amp-sine', from: { nodeId: 'vert-sine-example', pin: 'value' }, to: { nodeId: 'vert-amp-mult-example', pin: 'a' } },
+    { id: 'conn-vert-amp', from: { nodeId: 'vert-amp-example', pin: 'value' }, to: { nodeId: 'vert-amp-mult-example', pin: 'b' } },
+    { id: 'conn-vert-normal', from: { nodeId: 'normal-example', pin: 'value' }, to: { nodeId: 'vert-normal-mult-example', pin: 'a' } },
+    { id: 'conn-vert-offset', from: { nodeId: 'vert-amp-mult-example', pin: 'value' }, to: { nodeId: 'vert-normal-mult-example', pin: 'b' } },
+    { id: 'conn-vert-output', from: { nodeId: 'vert-normal-mult-example', pin: 'value' }, to: { nodeId: 'vertex-output-example', pin: 'position' } },
+    { id: 'conn-color-final', from: { nodeId: 'color-mult-example', pin: 'value' }, to: { nodeId: 'final-mult-example', pin: 'a' } },
+    { id: 'conn-pos-final', from: { nodeId: 'pos-invert-add-example', pin: 'value' }, to: { nodeId: 'final-mult-example', pin: 'b' } },
+    { id: 'conn-color-output', from: { nodeId: 'final-mult-example', pin: 'value' }, to: { nodeId: 'output-example', pin: 'baseColor' } },
+    { id: 'conn-roughness-output', from: { nodeId: 'roughness-example', pin: 'value' }, to: { nodeId: 'output-example', pin: 'roughness' } },
+    { id: 'conn-metalness-output', from: { nodeId: 'metalness-example', pin: 'value' }, to: { nodeId: 'output-example', pin: 'metalness' } },
+  ],
+  groups: [],
+  functions: {},
+}
+
+export const EXAMPLE_GRAPH_PRESET: TSLNodeEditorPreset & { graph: TSLNodeEditorGraph } = {
+  name: 'Animated Torus',
+  description: 'Colorful animated torus with vertex displacement',
+  graph: EXAMPLE_GRAPH_DATA,
+}
+
 const FALLBACK_COLOR = 0x111316
 const FALLBACK_COLOR_HEX = '#111316'
 
@@ -439,20 +657,60 @@ const ATTRIBUTE_NODE_EXPR: Record<string, ExprResult> = {
   bitangent: { expr: 'bitangentLocal', kind: 'vec3' },
   uv: { expr: 'uv()', kind: 'vec2' },
   uv2: { expr: 'uv(1)', kind: 'vec2' },
+  screenUV: { expr: 'screenUV', kind: 'vec2' },
+  screenSize: { expr: 'screenSize', kind: 'vec2' },
+  viewportUV: { expr: 'viewportUV', kind: 'vec2' },
+  depth: { expr: 'depth', kind: 'number' },
+  linearDepth: { expr: 'linearDepth', kind: 'number' },
+  cameraPosition: { expr: 'cameraPosition', kind: 'vec3' },
+  cameraNear: { expr: 'cameraNear', kind: 'number' },
+  cameraFar: { expr: 'cameraFar', kind: 'number' },
+  positionWorld: { expr: 'positionWorld', kind: 'vec3' },
+  positionView: { expr: 'positionView', kind: 'vec3' },
+  normalWorld: { expr: 'normalWorld', kind: 'vec3' },
+  normalView: { expr: 'normalView', kind: 'vec3' },
+  normalFlat: { expr: 'normalFlat', kind: 'vec3' },
+  frontFacing: { expr: 'frontFacing', kind: 'number' },
+  faceDirection: { expr: 'faceDirection', kind: 'number' },
+  matcapUV: { expr: 'matcapUV', kind: 'vec2' },
+  deltaTime: { expr: 'deltaTime', kind: 'number' },
+  frameId: { expr: 'frameId', kind: 'number' },
+  PI: { expr: 'PI', kind: 'number' },
+  PI2: { expr: 'PI2', kind: 'number' },
 }
 
-const ATTRIBUTE_NODE_KIND: Record<string, 'vec2' | 'vec3'> = {
+const ATTRIBUTE_NODE_KIND: Record<string, 'vec2' | 'vec3' | 'number'> = {
   position: 'vec3',
   normal: 'vec3',
   tangent: 'vec3',
   bitangent: 'vec3',
   uv: 'vec2',
   uv2: 'vec2',
+  screenUV: 'vec2',
+  screenSize: 'vec2',
+  viewportUV: 'vec2',
+  depth: 'number',
+  linearDepth: 'number',
+  cameraPosition: 'vec3',
+  cameraNear: 'number',
+  cameraFar: 'number',
+  positionWorld: 'vec3',
+  positionView: 'vec3',
+  normalWorld: 'vec3',
+  normalView: 'vec3',
+  normalFlat: 'vec3',
+  frontFacing: 'number',
+  faceDirection: 'number',
+  matcapUV: 'vec2',
+  deltaTime: 'number',
+  frameId: 'number',
+  PI: 'number',
+  PI2: 'number',
 }
 
 const getAttributeExpr = (nodeType: string): ExprResult | null =>
   ATTRIBUTE_NODE_EXPR[nodeType] ?? null
-const getAttributeKind = (nodeType: string): 'vec2' | 'vec3' | null =>
+const getAttributeKind = (nodeType: string): 'vec2' | 'vec3' | 'number' | null =>
   ATTRIBUTE_NODE_KIND[nodeType] ?? null
 const getAttributeNodeValue = (nodeType: string): TslNodeResult | null => {
   switch (nodeType) {
@@ -468,6 +726,46 @@ const getAttributeNodeValue = (nodeType: string): TslNodeResult | null => {
       return { node: uv(), kind: 'vec2' }
     case 'uv2':
       return { node: uv(1), kind: 'vec2' }
+    case 'screenUV':
+      return { node: screenUV, kind: 'vec2' }
+    case 'screenSize':
+      return { node: screenSize, kind: 'vec2' }
+    case 'viewportUV':
+      return { node: viewportUV, kind: 'vec2' }
+    case 'depth':
+      return { node: depth, kind: 'number' }
+    case 'linearDepth':
+      return { node: linearDepth(), kind: 'number' }
+    case 'cameraPosition':
+      return { node: cameraPosition, kind: 'vec3' }
+    case 'cameraNear':
+      return { node: cameraNear, kind: 'number' }
+    case 'cameraFar':
+      return { node: cameraFar, kind: 'number' }
+    case 'positionWorld':
+      return { node: positionWorld, kind: 'vec3' }
+    case 'positionView':
+      return { node: positionView, kind: 'vec3' }
+    case 'normalWorld':
+      return { node: normalWorld, kind: 'vec3' }
+    case 'normalView':
+      return { node: normalView, kind: 'vec3' }
+    case 'normalFlat':
+      return { node: normalFlat, kind: 'vec3' }
+    case 'frontFacing':
+      return { node: frontFacing, kind: 'number' }
+    case 'faceDirection':
+      return { node: faceDirection, kind: 'number' }
+    case 'matcapUV':
+      return { node: matcapUV, kind: 'vec2' }
+    case 'deltaTime':
+      return { node: deltaTime, kind: 'number' }
+    case 'frameId':
+      return { node: frameId, kind: 'number' }
+    case 'PI':
+      return { node: PI, kind: 'number' }
+    case 'PI2':
+      return { node: PI2, kind: 'number' }
     default:
       return null
   }
@@ -517,7 +815,17 @@ const getGltfMaterialTextureId = (nodeId: string, key: string) =>
 
 const getGltfTextureId = (nodeId: string) => `gltf-texture-${nodeId}`
 
-function App() {
+function TSLNodeEditor({
+  className,
+  style,
+  viewerUrl,
+  basisPath = '/basis/',
+  onChange,
+  hideGithubLink,
+  initialGraph,
+  disablePersistence,
+  presets,
+}: TSLNodeEditorProps = {}) {
   const viewportRef = useRef<HTMLDivElement | null>(null)
   const overlayOpenRef = useRef(false)
   const [status, setStatus] = useState('Initializing...')
@@ -530,7 +838,7 @@ function App() {
   const [gltfOutputText, setGltfOutputText] = useState('')
   const [viewerReadyTick, setViewerReadyTick] = useState(0)
   const [exportFormat, setExportFormat] = useState<'js' | 'ts'>('js')
-  const [toast, setToast] = useState<string | null>(null)
+  const [loadingPresetIndex, setLoadingPresetIndex] = useState<number | null>(null)
   const [materialReady, setMaterialReady] = useState(false)
   const [nodes, setNodes] = useState<GraphNode[]>([])
   const [groups, setGroups] = useState<GraphGroup[]>([])
@@ -539,6 +847,9 @@ function App() {
   const dragRef = useRef<{
     ids: string[]
     offsets: Record<string, { x: number; y: number }>
+    startClientX: number
+    startClientY: number
+    moved: boolean
     elements?: Record<string, HTMLElement>
   } | null>(null)
   const groupDragRef = useRef<{
@@ -557,6 +868,7 @@ function App() {
   const nodeLinksRef = useRef<SVGSVGElement | null>(null)
   const viewerRef = useRef<HTMLIFrameElement | null>(null)
   const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([])
+  const [selectedConnectionIds, setSelectedConnectionIds] = useState<string[]>([])
   const [connections, setConnections] = useState<GraphConnection[]>([])
   type HistorySnapshot = {
     nodes: GraphNode[]
@@ -619,7 +931,7 @@ function App() {
   const geometriesRef = useRef<BufferGeometry[]>([])
   const sceneRef = useRef<Scene | null>(null)
   const materialRef = useRef<
-    MeshStandardNodeMaterial | MeshPhysicalNodeMaterial | MeshBasicNodeMaterial | null
+    MeshStandardNodeMaterial | MeshPhysicalNodeMaterial | MeshBasicNodeMaterial | MeshToonNodeMaterial | MeshPhongNodeMaterial | MeshMatcapNodeMaterial | MeshNormalNodeMaterial | null
   >(
     null,
   )
@@ -1505,10 +1817,487 @@ function App() {
         outputs: ['baseColor'],
       },
       {
+        type: 'toonMaterial',
+        label: 'ToonMaterial',
+        inputs: [
+          'baseColor',
+          'baseColorTexture',
+          'emissive',
+          'emissiveMap',
+          'emissiveIntensity',
+          'normalMap',
+          'normalScale',
+          'opacity',
+          'alphaTest',
+          'alphaHash',
+        ],
+        outputs: ['baseColor'],
+      },
+      {
+        type: 'phongMaterial',
+        label: 'PhongMaterial',
+        inputs: [
+          'baseColor',
+          'baseColorTexture',
+          'specular',
+          'shininess',
+          'emissive',
+          'emissiveMap',
+          'emissiveIntensity',
+          'normalMap',
+          'normalScale',
+          'opacity',
+          'alphaTest',
+          'alphaHash',
+        ],
+        outputs: ['baseColor'],
+      },
+      {
+        type: 'matcapMaterial',
+        label: 'MatcapMaterial',
+        inputs: [
+          'baseColor',
+          'baseColorTexture',
+          'normalMap',
+          'normalScale',
+          'opacity',
+          'alphaTest',
+          'alphaHash',
+        ],
+        outputs: ['baseColor'],
+      },
+      {
+        type: 'normalMaterial',
+        label: 'NormalMaterial',
+        inputs: [
+          'normalMap',
+          'normalScale',
+          'opacity',
+          'alphaTest',
+          'alphaHash',
+        ],
+        outputs: ['baseColor'],
+      },
+      {
         type: 'output',
         label: 'Fragment Output',
         inputs: ['baseColor', 'roughness', 'metalness'],
         outputs: [],
+      },
+      // --- New accessor nodes ---
+      {
+        type: 'screenUV',
+        label: 'Screen UV',
+        inputs: [],
+        outputs: ['value'],
+      },
+      {
+        type: 'screenSize',
+        label: 'Screen Size',
+        inputs: [],
+        outputs: ['value'],
+      },
+      {
+        type: 'viewportUV',
+        label: 'Viewport UV',
+        inputs: [],
+        outputs: ['value'],
+      },
+      {
+        type: 'depth',
+        label: 'Depth',
+        inputs: [],
+        outputs: ['value'],
+      },
+      {
+        type: 'linearDepth',
+        label: 'Linear Depth',
+        inputs: [],
+        outputs: ['value'],
+      },
+      {
+        type: 'cameraPosition',
+        label: 'Camera Position',
+        inputs: [],
+        outputs: ['value'],
+      },
+      {
+        type: 'cameraNear',
+        label: 'Camera Near',
+        inputs: [],
+        outputs: ['value'],
+      },
+      {
+        type: 'cameraFar',
+        label: 'Camera Far',
+        inputs: [],
+        outputs: ['value'],
+      },
+      {
+        type: 'positionWorld',
+        label: 'Position World',
+        inputs: [],
+        outputs: ['value'],
+      },
+      {
+        type: 'positionView',
+        label: 'Position View',
+        inputs: [],
+        outputs: ['value'],
+      },
+      {
+        type: 'normalWorld',
+        label: 'Normal World',
+        inputs: [],
+        outputs: ['value'],
+      },
+      {
+        type: 'normalView',
+        label: 'Normal View',
+        inputs: [],
+        outputs: ['value'],
+      },
+      {
+        type: 'normalFlat',
+        label: 'Normal Flat',
+        inputs: [],
+        outputs: ['value'],
+      },
+      {
+        type: 'frontFacing',
+        label: 'Front Facing',
+        inputs: [],
+        outputs: ['value'],
+      },
+      {
+        type: 'faceDirection',
+        label: 'Face Direction',
+        inputs: [],
+        outputs: ['value'],
+      },
+      {
+        type: 'matcapUV',
+        label: 'Matcap UV',
+        inputs: [],
+        outputs: ['value'],
+      },
+      {
+        type: 'deltaTime',
+        label: 'Delta Time',
+        inputs: [],
+        outputs: ['value'],
+      },
+      {
+        type: 'frameId',
+        label: 'Frame ID',
+        inputs: [],
+        outputs: ['value'],
+      },
+      {
+        type: 'PI',
+        label: 'PI',
+        inputs: [],
+        outputs: ['value'],
+      },
+      {
+        type: 'PI2',
+        label: 'PI2',
+        inputs: [],
+        outputs: ['value'],
+      },
+      // --- Fog ---
+      {
+        type: 'rangeFogFactor',
+        label: 'Range Fog Factor',
+        inputs: ['near', 'far'],
+        outputs: ['value'],
+      },
+      {
+        type: 'densityFogFactor',
+        label: 'Density Fog Factor',
+        inputs: ['density'],
+        outputs: ['value'],
+      },
+      // --- Hash / Random ---
+      {
+        type: 'hash',
+        label: 'Hash',
+        inputs: ['value'],
+        outputs: ['value'],
+      },
+      {
+        type: 'rand',
+        label: 'Rand',
+        inputs: ['uv'],
+        outputs: ['value'],
+      },
+      {
+        type: 'interleavedGradientNoise',
+        label: 'Interleaved Gradient Noise',
+        inputs: ['uv'],
+        outputs: ['value'],
+      },
+      // --- Blend Modes ---
+      {
+        type: 'blendBurn',
+        label: 'Blend Burn',
+        inputs: ['base', 'blend'],
+        outputs: ['value'],
+      },
+      {
+        type: 'blendDodge',
+        label: 'Blend Dodge',
+        inputs: ['base', 'blend'],
+        outputs: ['value'],
+      },
+      {
+        type: 'blendScreen',
+        label: 'Blend Screen',
+        inputs: ['base', 'blend'],
+        outputs: ['value'],
+      },
+      {
+        type: 'blendOverlay',
+        label: 'Blend Overlay',
+        inputs: ['base', 'blend'],
+        outputs: ['value'],
+      },
+      {
+        type: 'blendColor',
+        label: 'Blend Color',
+        inputs: ['base', 'blend'],
+        outputs: ['value'],
+      },
+      {
+        type: 'premultiplyAlpha',
+        label: 'Premultiply Alpha',
+        inputs: ['value'],
+        outputs: ['value'],
+      },
+      {
+        type: 'unpremultiplyAlpha',
+        label: 'Unpremultiply Alpha',
+        inputs: ['value'],
+        outputs: ['value'],
+      },
+      // --- Color Adjustment ---
+      {
+        type: 'hue',
+        label: 'Hue',
+        inputs: ['value', 'amount'],
+        outputs: ['value'],
+      },
+      {
+        type: 'vibrance',
+        label: 'Vibrance',
+        inputs: ['value', 'amount'],
+        outputs: ['value'],
+      },
+      {
+        type: 'cdl',
+        label: 'CDL',
+        inputs: ['value', 'power', 'slope', 'offset'],
+        outputs: ['value'],
+      },
+      {
+        type: 'mxContrast',
+        label: 'MX Contrast',
+        inputs: ['value', 'amount', 'pivot'],
+        outputs: ['value'],
+      },
+      // --- HSV Conversion ---
+      {
+        type: 'mxHsvToRgb',
+        label: 'HSV to RGB',
+        inputs: ['value'],
+        outputs: ['value'],
+      },
+      {
+        type: 'mxRgbToHsv',
+        label: 'RGB to HSV',
+        inputs: ['value'],
+        outputs: ['value'],
+      },
+      // --- Oscillators ---
+      {
+        type: 'oscSine',
+        label: 'Osc Sine',
+        inputs: ['value'],
+        outputs: ['value'],
+      },
+      {
+        type: 'oscSquare',
+        label: 'Osc Square',
+        inputs: ['value'],
+        outputs: ['value'],
+      },
+      {
+        type: 'oscTriangle',
+        label: 'Osc Triangle',
+        inputs: ['value'],
+        outputs: ['value'],
+      },
+      {
+        type: 'oscSawtooth',
+        label: 'Osc Sawtooth',
+        inputs: ['value'],
+        outputs: ['value'],
+      },
+      // --- Shaping Functions ---
+      {
+        type: 'parabola',
+        label: 'Parabola',
+        inputs: ['value', 'k'],
+        outputs: ['value'],
+      },
+      {
+        type: 'gain',
+        label: 'Gain',
+        inputs: ['value', 'k'],
+        outputs: ['value'],
+      },
+      {
+        type: 'pcurve',
+        label: 'PCurve',
+        inputs: ['value', 'a', 'b'],
+        outputs: ['value'],
+      },
+      {
+        type: 'sinc',
+        label: 'Sinc',
+        inputs: ['value', 'k'],
+        outputs: ['value'],
+      },
+      // --- Cell Noise ---
+      {
+        type: 'mxCellNoiseFloat',
+        label: 'MX Cell Noise Float',
+        inputs: ['texcoord'],
+        outputs: ['value'],
+      },
+      // --- UV / Coord Utilities ---
+      {
+        type: 'equirectUV',
+        label: 'Equirect UV',
+        inputs: ['direction'],
+        outputs: ['value'],
+      },
+      {
+        type: 'parallaxUV',
+        label: 'Parallax UV',
+        inputs: ['uv', 'scale'],
+        outputs: ['value'],
+      },
+      {
+        type: 'mxRotate2d',
+        label: 'MX Rotate 2D',
+        inputs: ['value', 'angle'],
+        outputs: ['value'],
+      },
+      // --- Normal Mapping ---
+      {
+        type: 'bumpMap',
+        label: 'Bump Map',
+        inputs: ['value', 'scale'],
+        outputs: ['value'],
+      },
+      {
+        type: 'mxHeightToNormal',
+        label: 'MX Height to Normal',
+        inputs: ['value', 'scale'],
+        outputs: ['value'],
+      },
+      // --- Gradients ---
+      {
+        type: 'mxRampLR',
+        label: 'MX Ramp LR',
+        inputs: ['a', 'b', 'coord'],
+        outputs: ['value'],
+      },
+      {
+        type: 'mxRampTB',
+        label: 'MX Ramp TB',
+        inputs: ['a', 'b', 'coord'],
+        outputs: ['value'],
+      },
+      {
+        type: 'mxRamp4',
+        label: 'MX Ramp 4',
+        inputs: ['tl', 'tr', 'bl', 'br', 'coord'],
+        outputs: ['value'],
+      },
+      {
+        type: 'mxSplitLR',
+        label: 'MX Split LR',
+        inputs: ['a', 'b', 'center', 'coord'],
+        outputs: ['value'],
+      },
+      {
+        type: 'mxSplitTB',
+        label: 'MX Split TB',
+        inputs: ['a', 'b', 'center', 'coord'],
+        outputs: ['value'],
+      },
+      // --- Math / Misc ---
+      {
+        type: 'reciprocal',
+        label: 'Reciprocal',
+        inputs: ['value'],
+        outputs: ['value'],
+      },
+      {
+        type: 'cbrt',
+        label: 'Cbrt',
+        inputs: ['value'],
+        outputs: ['value'],
+      },
+      {
+        type: 'lengthSq',
+        label: 'Length Squared',
+        inputs: ['value'],
+        outputs: ['value'],
+      },
+      {
+        type: 'difference',
+        label: 'Difference',
+        inputs: ['a', 'b'],
+        outputs: ['value'],
+      },
+      {
+        type: 'inverseSqrt',
+        label: 'Inverse Sqrt',
+        inputs: ['value'],
+        outputs: ['value'],
+      },
+      {
+        type: 'mxAastep',
+        label: 'MX AA Step',
+        inputs: ['threshold', 'value'],
+        outputs: ['value'],
+      },
+      {
+        type: 'mxSafepower',
+        label: 'MX Safe Power',
+        inputs: ['value', 'exp'],
+        outputs: ['value'],
+      },
+      {
+        type: 'shapeCircle',
+        label: 'Shape Circle',
+        inputs: ['uv', 'radius'],
+        outputs: ['value'],
+      },
+      {
+        type: 'directionToColor',
+        label: 'Direction to Color',
+        inputs: ['value'],
+        outputs: ['value'],
+      },
+      {
+        type: 'colorToDirection',
+        label: 'Color to Direction',
+        inputs: ['value'],
+        outputs: ['value'],
       },
     ],
     [],
@@ -1547,6 +2336,10 @@ function App() {
     const source = nodeMap.get(baseColorConn.from.nodeId)
     if (source?.type === 'basicMaterial') return 'basic' as const
     if (source?.type === 'physicalMaterial') return 'physical' as const
+    if (source?.type === 'toonMaterial') return 'toon' as const
+    if (source?.type === 'phongMaterial') return 'phong' as const
+    if (source?.type === 'matcapMaterial') return 'matcap' as const
+    if (source?.type === 'normalMaterial') return 'normal' as const
     return 'standard' as const
   }
 
@@ -1560,6 +2353,10 @@ function App() {
         standardMaterialNode: null as GraphNode | null,
         physicalMaterialNode: null as GraphNode | null,
         basicMaterialNode: null as GraphNode | null,
+        toonMaterialNode: null as GraphNode | null,
+        phongMaterialNode: null as GraphNode | null,
+        matcapMaterialNode: null as GraphNode | null,
+        normalMaterialNode: null as GraphNode | null,
       }
     }
     const baseColorConn = connectionMap.get(`${outputNode.id}:baseColor`)
@@ -1568,13 +2365,17 @@ function App() {
       standardMaterialNode: source?.type === 'material' ? source : null,
       physicalMaterialNode: source?.type === 'physicalMaterial' ? source : null,
       basicMaterialNode: source?.type === 'basicMaterial' ? source : null,
+      toonMaterialNode: source?.type === 'toonMaterial' ? source : null,
+      phongMaterialNode: source?.type === 'phongMaterial' ? source : null,
+      matcapMaterialNode: source?.type === 'matcapMaterial' ? source : null,
+      normalMaterialNode: source?.type === 'normalMaterial' ? source : null,
     }
   }
 
   const paletteGroups = useMemo(() => {
     const functionTypes = Object.keys(functions).map((id) => `function:${id}`)
     return [
-      { id: 'inputs', label: 'Inputs', types: ['number', 'time', 'color', 'texture', 'gltfTexture'] },
+      { id: 'inputs', label: 'Inputs', types: ['number', 'time', 'color', 'texture', 'gltfTexture', 'deltaTime', 'frameId', 'PI', 'PI2'] },
       {
         id: 'color',
         label: 'Color',
@@ -1591,6 +2392,21 @@ function App() {
           'acesFilmicToneMapping',
           'agxToneMapping',
           'neutralToneMapping',
+          'blendBurn',
+          'blendDodge',
+          'blendScreen',
+          'blendOverlay',
+          'blendColor',
+          'premultiplyAlpha',
+          'unpremultiplyAlpha',
+          'hue',
+          'vibrance',
+          'cdl',
+          'mxContrast',
+          'mxHsvToRgb',
+          'mxRgbToHsv',
+          'directionToColor',
+          'colorToDirection',
         ],
       },
       {
@@ -1605,6 +2421,22 @@ function App() {
           'uv2',
           'geometryPrimitive',
           'gltf',
+          'positionWorld',
+          'positionView',
+          'normalWorld',
+          'normalView',
+          'normalFlat',
+          'screenUV',
+          'screenSize',
+          'viewportUV',
+          'depth',
+          'linearDepth',
+          'cameraPosition',
+          'cameraNear',
+          'cameraFar',
+          'frontFacing',
+          'faceDirection',
+          'matcapUV',
         ],
       },
       {
@@ -1675,6 +2507,13 @@ function App() {
           'and',
           'or',
           'not',
+          'reciprocal',
+          'cbrt',
+          'lengthSq',
+          'difference',
+          'inverseSqrt',
+          'mxAastep',
+          'mxSafepower',
         ],
       },
       {
@@ -1693,11 +2532,52 @@ function App() {
           'mxWorleyNoiseFloat',
           'mxWorleyNoiseVec2',
           'mxWorleyNoiseVec3',
+          'mxCellNoiseFloat',
+          'hash',
+          'rand',
+          'interleavedGradientNoise',
           'rotateUV',
           'scaleUV',
           'offsetUV',
           'spherizeUV',
           'spritesheetUV',
+          'equirectUV',
+          'parallaxUV',
+          'mxRotate2d',
+        ],
+      },
+      {
+        id: 'oscillators',
+        label: 'Oscillators',
+        types: [
+          'oscSine',
+          'oscSquare',
+          'oscTriangle',
+          'oscSawtooth',
+          'parabola',
+          'gain',
+          'pcurve',
+          'sinc',
+          'shapeCircle',
+        ],
+      },
+      {
+        id: 'gradients',
+        label: 'Gradients',
+        types: [
+          'mxRampLR',
+          'mxRampTB',
+          'mxRamp4',
+          'mxSplitLR',
+          'mxSplitTB',
+        ],
+      },
+      {
+        id: 'normalMapping',
+        label: 'Normal Mapping',
+        types: [
+          'bumpMap',
+          'mxHeightToNormal',
         ],
       },
       {
@@ -1725,9 +2605,14 @@ function App() {
         ],
       },
       {
+        id: 'fog',
+        label: 'Fog',
+        types: ['rangeFogFactor', 'densityFogFactor'],
+      },
+      {
         id: 'material',
         label: 'Material',
-        types: ['material', 'physicalMaterial', 'basicMaterial', 'gltfMaterial'],
+        types: ['material', 'physicalMaterial', 'basicMaterial', 'toonMaterial', 'phongMaterial', 'matcapMaterial', 'normalMaterial', 'gltfMaterial'],
       },
       {
         id: 'outputs',
@@ -1832,7 +2717,13 @@ function App() {
 
   useEffect(() => {
     setSelectedNodeIds([])
+    setSelectedConnectionIds([])
   }, [activeFunctionId])
+
+  useEffect(() => {
+    const available = new Set(editorConnections.map((connection) => connection.id))
+    setSelectedConnectionIds((prev) => prev.filter((id) => available.has(id)))
+  }, [editorConnections])
 
   useEffect(() => {
     if (activeFunctionId && !functions[activeFunctionId]) {
@@ -2041,589 +2932,7 @@ function App() {
 
   const exampleGraph = useMemo<ExampleGraph>(
     () => ({
-      nodes: [
-        {
-          id: 'color-example',
-          type: 'color',
-          label: 'Color',
-          x: 60,
-          y: 120,
-          inputs: [],
-          outputs: ['color'],
-          value: DEFAULT_COLOR,
-        },
-        {
-          id: 'geometry-example',
-          type: 'geometryPrimitive',
-          label: 'Geometry',
-          x: 60,
-          y: 400,
-          inputs: [],
-          outputs: ['geometry'],
-          value: 'torus',
-        },
-        {
-          id: 'geometry-output-example',
-          type: 'geometryOutput',
-          label: 'Geometry Output',
-          x: 320,
-          y: 460,
-          inputs: ['geometry'],
-          outputs: [],
-        },
-        {
-          id: 'time-example',
-          type: 'time',
-          label: 'Time',
-          x: 60,
-          y: 260,
-          inputs: [],
-          outputs: ['value'],
-        },
-        {
-          id: 'color-mult-example',
-          type: 'multiply',
-          label: 'Multiply',
-          x: 1100,
-          y: 200,
-          inputs: ['a', 'b'],
-          outputs: ['value'],
-        },
-        {
-          id: 'position-example',
-          type: 'position',
-          label: 'Position',
-          x: 60,
-          y: 540,
-          inputs: [],
-          outputs: ['value'],
-        },
-        {
-          id: 'length-example',
-          type: 'length',
-          label: 'Length',
-          x: 320,
-          y: 1000,
-          inputs: ['value'],
-          outputs: ['value'],
-        },
-        {
-          id: 'pos-freq-example',
-          type: 'number',
-          label: 'Number',
-          x: 320,
-          y: 1180,
-          inputs: [],
-          outputs: ['value'],
-          value: '6',
-          slider: false,
-          updateMode: 'manual',
-          updateSource: 'value',
-        },
-        {
-          id: 'pos-freq-mult-example',
-          type: 'multiply',
-          label: 'Multiply',
-          x: 580,
-          y: 940,
-          inputs: ['a', 'b'],
-          outputs: ['value'],
-        },
-        {
-          id: 'pos-speed-example',
-          type: 'number',
-          label: 'Number',
-          x: 320,
-          y: 640,
-          inputs: [],
-          outputs: ['value'],
-          value: '2.5',
-          slider: false,
-          updateMode: 'manual',
-          updateSource: 'value',
-        },
-        {
-          id: 'pos-time-mult-example',
-          type: 'multiply',
-          label: 'Multiply',
-          x: 580,
-          y: 520,
-          inputs: ['a', 'b'],
-          outputs: ['value'],
-        },
-        {
-          id: 'pos-time-neg-example',
-          type: 'number',
-          label: 'Number',
-          x: 320,
-          y: 820,
-          inputs: [],
-          outputs: ['value'],
-          value: '-1',
-          slider: false,
-          updateMode: 'manual',
-          updateSource: 'value',
-        },
-        {
-          id: 'pos-time-neg-mult-example',
-          type: 'multiply',
-          label: 'Multiply',
-          x: 580,
-          y: 660,
-          inputs: ['a', 'b'],
-          outputs: ['value'],
-        },
-        {
-          id: 'pos-phase-example',
-          type: 'add',
-          label: 'Add',
-          x: 840,
-          y: 420,
-          inputs: ['a', 'b'],
-          outputs: ['value'],
-        },
-        {
-          id: 'pos-wave-example',
-          type: 'sine',
-          label: 'Sine',
-          x: 1100,
-          y: 420,
-          inputs: ['value'],
-          outputs: ['value'],
-        },
-        {
-          id: 'pos-edge-low-example',
-          type: 'number',
-          label: 'Number',
-          x: 320,
-          y: 120,
-          inputs: [],
-          outputs: ['value'],
-          value: '0.85',
-          slider: false,
-          updateMode: 'manual',
-          updateSource: 'value',
-        },
-        {
-          id: 'pos-edge-high-example',
-          type: 'number',
-          label: 'Number',
-          x: 320,
-          y: 280,
-          inputs: [],
-          outputs: ['value'],
-          value: '0.95',
-          slider: false,
-          updateMode: 'manual',
-          updateSource: 'value',
-        },
-        {
-          id: 'pos-band-example',
-          type: 'smoothstep',
-          label: 'Smoothstep',
-          x: 1360,
-          y: 420,
-          inputs: ['edge0', 'edge1', 'x'],
-          outputs: ['value'],
-        },
-        {
-          id: 'pos-invert-mult-example',
-          type: 'multiply',
-          label: 'Multiply',
-          x: 1620,
-          y: 420,
-          inputs: ['a', 'b'],
-          outputs: ['value'],
-        },
-        {
-          id: 'pos-invert-bias-example',
-          type: 'number',
-          label: 'Number',
-          x: 1620,
-          y: 560,
-          inputs: [],
-          outputs: ['value'],
-          value: '-1',
-          slider: false,
-          updateMode: 'manual',
-          updateSource: 'value',
-        },
-        {
-          id: 'pos-invert-add-example',
-          type: 'add',
-          label: 'Add',
-          x: 1880,
-          y: 420,
-          inputs: ['a', 'b'],
-          outputs: ['value'],
-        },
-        {
-          id: 'pos-invert-one-example',
-          type: 'number',
-          label: 'Number',
-          x: 1880,
-          y: 560,
-          inputs: [],
-          outputs: ['value'],
-          value: '1',
-          slider: false,
-          updateMode: 'manual',
-          updateSource: 'value',
-        },
-        {
-          id: 'normal-example',
-          type: 'normal',
-          label: 'Normal',
-          x: 60,
-          y: 700,
-          inputs: [],
-          outputs: ['value'],
-        },
-        {
-          id: 'vert-split-example',
-          type: 'splitVec3',
-          label: 'Split Vec3',
-          x: 320,
-          y: 1360,
-          inputs: ['value'],
-          outputs: ['x', 'y', 'z'],
-        },
-        {
-          id: 'vert-length-mult-example',
-          type: 'multiply',
-          label: 'Multiply',
-          x: 580,
-          y: 1080,
-          inputs: ['a', 'b'],
-          outputs: ['value'],
-        },
-        {
-          id: 'vert-freq-example',
-          type: 'number',
-          label: 'Number',
-          x: 320,
-          y: 1540,
-          inputs: [],
-          outputs: ['value'],
-          value: '3',
-          slider: false,
-          updateMode: 'manual',
-          updateSource: 'value',
-        },
-        {
-          id: 'vert-time-mult-example',
-          type: 'multiply',
-          label: 'Multiply',
-          x: 580,
-          y: 1360,
-          inputs: ['a', 'b'],
-          outputs: ['value'],
-        },
-        {
-          id: 'vert-speed-example',
-          type: 'number',
-          label: 'Number',
-          x: 320,
-          y: 1720,
-          inputs: [],
-          outputs: ['value'],
-          value: '2',
-          slider: false,
-          updateMode: 'manual',
-          updateSource: 'value',
-        },
-        {
-          id: 'vert-phase-example',
-          type: 'add',
-          label: 'Add',
-          x: 840,
-          y: 1220,
-          inputs: ['a', 'b'],
-          outputs: ['value'],
-        },
-        {
-          id: 'vert-sine-example',
-          type: 'sine',
-          label: 'Sine',
-          x: 1100,
-          y: 1220,
-          inputs: ['value'],
-          outputs: ['value'],
-        },
-        {
-          id: 'vert-amp-example',
-          type: 'number',
-          label: 'Number',
-          x: 1100,
-          y: 1360,
-          inputs: [],
-          outputs: ['value'],
-          value: '0.15',
-          slider: false,
-          updateMode: 'manual',
-          updateSource: 'value',
-        },
-        {
-          id: 'vert-amp-mult-example',
-          type: 'multiply',
-          label: 'Multiply',
-          x: 1360,
-          y: 1220,
-          inputs: ['a', 'b'],
-          outputs: ['value'],
-        },
-        {
-          id: 'vert-normal-mult-example',
-          type: 'multiply',
-          label: 'Multiply',
-          x: 1360,
-          y: 1360,
-          inputs: ['a', 'b'],
-          outputs: ['value'],
-        },
-        {
-          id: 'vertex-output-example',
-          type: 'vertexOutput',
-          label: 'Vertex Output',
-          x: 1620,
-          y: 1280,
-          inputs: ['position'],
-          outputs: [],
-        },
-        {
-          id: 'final-mult-example',
-          type: 'multiply',
-          label: 'Multiply',
-          x: 2140,
-          y: 260,
-          inputs: ['a', 'b'],
-          outputs: ['value'],
-        },
-        {
-          id: 'roughness-example',
-          type: 'number',
-          label: 'Number',
-          x: 60,
-          y: 840,
-          inputs: [],
-          outputs: ['value'],
-          value: '0.6',
-          slider: false,
-          updateMode: 'manual',
-          updateSource: 'value',
-        },
-        {
-          id: 'metalness-example',
-          type: 'number',
-          label: 'Number',
-          x: 60,
-          y: 980,
-          inputs: [],
-          outputs: ['value'],
-          value: '0.1',
-          slider: false,
-          updateMode: 'manual',
-          updateSource: 'value',
-        },
-        {
-          id: 'output-example',
-          type: 'output',
-          label: 'Fragment Output',
-          x: 2400,
-          y: 260,
-          inputs: ['baseColor', 'roughness', 'metalness'],
-          outputs: [],
-        },
-      ],
-      connections: [
-        {
-          id: 'conn-time-speed',
-          from: { nodeId: 'time-example', pin: 'value' },
-          to: { nodeId: 'pos-time-mult-example', pin: 'a' },
-        },
-        {
-          id: 'conn-color-mult',
-          from: { nodeId: 'color-example', pin: 'color' },
-          to: { nodeId: 'color-mult-example', pin: 'a' },
-        },
-        {
-          id: 'conn-geometry-output',
-          from: { nodeId: 'geometry-example', pin: 'geometry' },
-          to: { nodeId: 'geometry-output-example', pin: 'geometry' },
-        },
-        {
-          id: 'conn-position-add',
-          from: { nodeId: 'position-example', pin: 'value' },
-          to: { nodeId: 'length-example', pin: 'value' },
-        },
-        {
-          id: 'conn-length-freq',
-          from: { nodeId: 'length-example', pin: 'value' },
-          to: { nodeId: 'pos-freq-mult-example', pin: 'a' },
-        },
-        {
-          id: 'conn-freq-mult',
-          from: { nodeId: 'pos-freq-example', pin: 'value' },
-          to: { nodeId: 'pos-freq-mult-example', pin: 'b' },
-        },
-        {
-          id: 'conn-speed-mult',
-          from: { nodeId: 'pos-speed-example', pin: 'value' },
-          to: { nodeId: 'pos-time-mult-example', pin: 'b' },
-        },
-        {
-          id: 'conn-time-neg',
-          from: { nodeId: 'pos-time-mult-example', pin: 'value' },
-          to: { nodeId: 'pos-time-neg-mult-example', pin: 'a' },
-        },
-        {
-          id: 'conn-time-neg-value',
-          from: { nodeId: 'pos-time-neg-example', pin: 'value' },
-          to: { nodeId: 'pos-time-neg-mult-example', pin: 'b' },
-        },
-        {
-          id: 'conn-phase-add-a',
-          from: { nodeId: 'pos-freq-mult-example', pin: 'value' },
-          to: { nodeId: 'pos-phase-example', pin: 'a' },
-        },
-        {
-          id: 'conn-phase-add-b',
-          from: { nodeId: 'pos-time-neg-mult-example', pin: 'value' },
-          to: { nodeId: 'pos-phase-example', pin: 'b' },
-        },
-        {
-          id: 'conn-phase-sine',
-          from: { nodeId: 'pos-phase-example', pin: 'value' },
-          to: { nodeId: 'pos-wave-example', pin: 'value' },
-        },
-        {
-          id: 'conn-band-edge0',
-          from: { nodeId: 'pos-edge-low-example', pin: 'value' },
-          to: { nodeId: 'pos-band-example', pin: 'edge0' },
-        },
-        {
-          id: 'conn-band-edge1',
-          from: { nodeId: 'pos-edge-high-example', pin: 'value' },
-          to: { nodeId: 'pos-band-example', pin: 'edge1' },
-        },
-        {
-          id: 'conn-band-x',
-          from: { nodeId: 'pos-wave-example', pin: 'value' },
-          to: { nodeId: 'pos-band-example', pin: 'x' },
-        },
-        {
-          id: 'conn-invert-band',
-          from: { nodeId: 'pos-band-example', pin: 'value' },
-          to: { nodeId: 'pos-invert-mult-example', pin: 'a' },
-        },
-        {
-          id: 'conn-invert-mult',
-          from: { nodeId: 'pos-invert-bias-example', pin: 'value' },
-          to: { nodeId: 'pos-invert-mult-example', pin: 'b' },
-        },
-        {
-          id: 'conn-invert-add-a',
-          from: { nodeId: 'pos-invert-mult-example', pin: 'value' },
-          to: { nodeId: 'pos-invert-add-example', pin: 'a' },
-        },
-        {
-          id: 'conn-invert-add-b',
-          from: { nodeId: 'pos-invert-one-example', pin: 'value' },
-          to: { nodeId: 'pos-invert-add-example', pin: 'b' },
-        },
-        {
-          id: 'conn-vert-length',
-          from: { nodeId: 'vert-split-example', pin: 'y' },
-          to: { nodeId: 'vert-length-mult-example', pin: 'a' },
-        },
-        {
-          id: 'conn-vert-split',
-          from: { nodeId: 'position-example', pin: 'value' },
-          to: { nodeId: 'vert-split-example', pin: 'value' },
-        },
-        {
-          id: 'conn-vert-freq',
-          from: { nodeId: 'vert-freq-example', pin: 'value' },
-          to: { nodeId: 'vert-length-mult-example', pin: 'b' },
-        },
-        {
-          id: 'conn-vert-time',
-          from: { nodeId: 'time-example', pin: 'value' },
-          to: { nodeId: 'vert-time-mult-example', pin: 'a' },
-        },
-        {
-          id: 'conn-vert-speed',
-          from: { nodeId: 'vert-speed-example', pin: 'value' },
-          to: { nodeId: 'vert-time-mult-example', pin: 'b' },
-        },
-        {
-          id: 'conn-vert-phase-a',
-          from: { nodeId: 'vert-length-mult-example', pin: 'value' },
-          to: { nodeId: 'vert-phase-example', pin: 'a' },
-        },
-        {
-          id: 'conn-vert-phase-b',
-          from: { nodeId: 'vert-time-mult-example', pin: 'value' },
-          to: { nodeId: 'vert-phase-example', pin: 'b' },
-        },
-        {
-          id: 'conn-vert-sine',
-          from: { nodeId: 'vert-phase-example', pin: 'value' },
-          to: { nodeId: 'vert-sine-example', pin: 'value' },
-        },
-        {
-          id: 'conn-vert-amp-sine',
-          from: { nodeId: 'vert-sine-example', pin: 'value' },
-          to: { nodeId: 'vert-amp-mult-example', pin: 'a' },
-        },
-        {
-          id: 'conn-vert-amp',
-          from: { nodeId: 'vert-amp-example', pin: 'value' },
-          to: { nodeId: 'vert-amp-mult-example', pin: 'b' },
-        },
-        {
-          id: 'conn-vert-normal',
-          from: { nodeId: 'normal-example', pin: 'value' },
-          to: { nodeId: 'vert-normal-mult-example', pin: 'a' },
-        },
-        {
-          id: 'conn-vert-offset',
-          from: { nodeId: 'vert-amp-mult-example', pin: 'value' },
-          to: { nodeId: 'vert-normal-mult-example', pin: 'b' },
-        },
-        {
-          id: 'conn-vert-output',
-          from: { nodeId: 'vert-normal-mult-example', pin: 'value' },
-          to: { nodeId: 'vertex-output-example', pin: 'position' },
-        },
-        {
-          id: 'conn-color-final',
-          from: { nodeId: 'color-mult-example', pin: 'value' },
-          to: { nodeId: 'final-mult-example', pin: 'a' },
-        },
-        {
-          id: 'conn-pos-final',
-          from: { nodeId: 'pos-invert-add-example', pin: 'value' },
-          to: { nodeId: 'final-mult-example', pin: 'b' },
-        },
-        {
-          id: 'conn-color-output',
-          from: { nodeId: 'final-mult-example', pin: 'value' },
-          to: { nodeId: 'output-example', pin: 'baseColor' },
-        },
-        {
-          id: 'conn-roughness-output',
-          from: { nodeId: 'roughness-example', pin: 'value' },
-          to: { nodeId: 'output-example', pin: 'roughness' },
-        },
-        {
-          id: 'conn-metalness-output',
-          from: { nodeId: 'metalness-example', pin: 'value' },
-          to: { nodeId: 'output-example', pin: 'metalness' },
-        },
-      ],
-      groups: [],
-      functions: {},
+      ...EXAMPLE_GRAPH_DATA,
       ui: { paletteOpen: paletteDefaults },
     }),
     [paletteDefaults],
@@ -3447,6 +3756,145 @@ function App() {
       if (inputType === 'vec3') return 'vec3'
       return 'unknown'
     }
+    // --- Nodes that always return 'number' ---
+    if (
+      node.type === 'hash' ||
+      node.type === 'rand' ||
+      node.type === 'interleavedGradientNoise' ||
+      node.type === 'mxCellNoiseFloat' ||
+      node.type === 'lengthSq' ||
+      node.type === 'mxAastep' ||
+      node.type === 'shapeCircle'
+    ) {
+      return 'number'
+    }
+    // --- Unary pass-through nodes (return same kind as input 'value') ---
+    if (
+      node.type === 'reciprocal' ||
+      node.type === 'cbrt' ||
+      node.type === 'inverseSqrt' ||
+      node.type === 'oscSine' ||
+      node.type === 'oscSquare' ||
+      node.type === 'oscTriangle' ||
+      node.type === 'oscSawtooth' ||
+      node.type === 'parabola' ||
+      node.type === 'gain' ||
+      node.type === 'sinc' ||
+      node.type === 'premultiplyAlpha' ||
+      node.type === 'unpremultiplyAlpha' ||
+      node.type === 'directionToColor' ||
+      node.type === 'colorToDirection'
+    ) {
+      const input = connectionMap.get(`${node.id}:value`)
+      const inputType = input
+        ? inferType(input.from.nodeId, input.from.pin, nodeMap, connectionMap, stack)
+        : 'number'
+      if (inputType === 'number' || isVectorKind(inputType)) return inputType
+      return 'unknown'
+    }
+    // --- mxSafepower: 2 args, always returns 'number' ---
+    if (node.type === 'mxSafepower') return 'number'
+    // --- Blend modes (color-preserving on 2 color inputs) ---
+    if (
+      node.type === 'blendBurn' ||
+      node.type === 'blendDodge' ||
+      node.type === 'blendScreen' ||
+      node.type === 'blendOverlay' ||
+      node.type === 'blendColor'
+    ) {
+      const input = connectionMap.get(`${node.id}:base`)
+      const inputType = input
+        ? inferType(input.from.nodeId, input.from.pin, nodeMap, connectionMap, stack)
+        : 'color'
+      if (inputType === 'color') return 'color'
+      if (inputType === 'vec3') return 'vec3'
+      return 'unknown'
+    }
+    // --- Color adjustment (color-preserving) ---
+    if (
+      node.type === 'hue' ||
+      node.type === 'vibrance' ||
+      node.type === 'cdl' ||
+      node.type === 'mxContrast'
+    ) {
+      const input = connectionMap.get(`${node.id}:value`)
+      const inputType = input
+        ? inferType(input.from.nodeId, input.from.pin, nodeMap, connectionMap, stack)
+        : 'color'
+      if (inputType === 'color') return 'color'
+      if (inputType === 'vec3') return 'vec3'
+      return 'unknown'
+    }
+    // --- HSV/RGB conversions always return vec3 ---
+    if (node.type === 'mxHsvToRgb' || node.type === 'mxRgbToHsv') return 'vec3'
+    // --- pcurve: pass-through on 'value' ---
+    if (node.type === 'pcurve') {
+      const input = connectionMap.get(`${node.id}:value`)
+      const inputType = input
+        ? inferType(input.from.nodeId, input.from.pin, nodeMap, connectionMap, stack)
+        : 'number'
+      if (inputType === 'number' || isVectorKind(inputType)) return inputType
+      return 'unknown'
+    }
+    // --- UV/coord nodes returning vec2 ---
+    if (
+      node.type === 'equirectUV' ||
+      node.type === 'parallaxUV' ||
+      node.type === 'mxRotate2d'
+    ) {
+      return 'vec2'
+    }
+    // --- Normal mapping returning vec3 ---
+    if (node.type === 'bumpMap' || node.type === 'mxHeightToNormal') return 'vec3'
+    // --- Gradient nodes (kind-preserving based on a/b inputs) ---
+    if (
+      node.type === 'mxRampLR' ||
+      node.type === 'mxRampTB' ||
+      node.type === 'mxSplitLR' ||
+      node.type === 'mxSplitTB'
+    ) {
+      const inputA = connectionMap.get(`${node.id}:a`)
+      const inputB = connectionMap.get(`${node.id}:b`)
+      const typeA = inputA
+        ? inferType(inputA.from.nodeId, inputA.from.pin, nodeMap, connectionMap, stack)
+        : 'number'
+      const typeB = inputB
+        ? inferType(inputB.from.nodeId, inputB.from.pin, nodeMap, connectionMap, stack)
+        : 'number'
+      if (typeA === 'number') return typeB
+      if (typeB === 'number') return typeA
+      if (typeA === typeB) return typeA
+      return 'unknown'
+    }
+    if (node.type === 'mxRamp4') {
+      const inputTL = connectionMap.get(`${node.id}:tl`)
+      const inputTR = connectionMap.get(`${node.id}:tr`)
+      const typeTL = inputTL
+        ? inferType(inputTL.from.nodeId, inputTL.from.pin, nodeMap, connectionMap, stack)
+        : 'number'
+      const typeTR = inputTR
+        ? inferType(inputTR.from.nodeId, inputTR.from.pin, nodeMap, connectionMap, stack)
+        : 'number'
+      if (typeTL === 'number') return typeTR
+      if (typeTR === 'number') return typeTL
+      if (typeTL === typeTR) return typeTL
+      return 'unknown'
+    }
+    // --- difference: combine types of a/b (like min/max) ---
+    if (node.type === 'difference') {
+      const inputA = connectionMap.get(`${node.id}:a`)
+      const inputB = connectionMap.get(`${node.id}:b`)
+      const typeA = inputA
+        ? inferType(inputA.from.nodeId, inputA.from.pin, nodeMap, connectionMap, stack)
+        : 'number'
+      const typeB = inputB
+        ? inferType(inputB.from.nodeId, inputB.from.pin, nodeMap, connectionMap, stack)
+        : 'number'
+      if (typeA === 'number') return typeB
+      if (typeB === 'number') return typeA
+      if (typeA === typeB) return typeA
+      return 'unknown'
+    }
     if (node.type === 'geometryPrimitive') return 'geometry'
     if (node.type === 'gltf') return 'geometry'
     if (node.type === 'add' || node.type === 'multiply') {
@@ -3485,8 +3933,11 @@ function App() {
       }
       return 'color'
     }
-    if (node.type === 'basicMaterial') {
+    if (node.type === 'basicMaterial' || node.type === 'toonMaterial' || node.type === 'phongMaterial' || node.type === 'matcapMaterial' || node.type === 'normalMaterial') {
       return 'color'
+    }
+    if (node.type === 'rangeFogFactor' || node.type === 'densityFogFactor') {
+      return 'number'
     }
     if (node.type === 'output') return 'color'
     if (node.type === 'vertexOutput') return 'vec3'
@@ -3504,7 +3955,7 @@ function App() {
       const functionId = type.slice('function:'.length)
       const def = functions[functionId]
       if (!def) {
-        setToast('Function not found')
+        toast.error('Function not found')
         return
       }
       setEditorNodes((prev) => [
@@ -3524,14 +3975,14 @@ function App() {
     }
     const template = palette.find((item) => item.type === type)
     if (type === 'output' && editorNodes.some((node) => node.type === 'output')) {
-      setToast('Only one Output node is allowed')
+      toast.error('Only one Output node is allowed')
       return
     }
     if (
       type === 'geometryOutput' &&
       editorNodes.some((node) => node.type === 'geometryOutput')
     ) {
-      setToast('Only one Geometry Output node is allowed')
+      toast.error('Only one Geometry Output node is allowed')
       return
     }
     setEditorNodes((prev) => [
@@ -3641,8 +4092,9 @@ function App() {
   }, [storageSlot])
 
   useEffect(() => {
+    if (disablePersistence) return
     void refreshStorageSlots()
-  }, [refreshStorageSlots])
+  }, [refreshStorageSlots, disablePersistence])
 
   const writeGraphRecord = async (
     slotKey: string,
@@ -3669,12 +4121,12 @@ function App() {
         tx.onerror = () => reject(tx.error)
       })
       if (!options?.silent) {
-        setToast(`Saved slot "${slotKey}"`)
+        toast.success(`Saved slot "${slotKey}"`)
       }
       void refreshStorageSlots()
     } catch {
       if (!options?.silent) {
-        setToast('Save failed')
+        toast.error('Save failed')
       }
     }
   }
@@ -3773,12 +4225,12 @@ function App() {
       })
 
       if (!options?.silent) {
-        setToast(`Saved slot "${slotKey}"`)
+        toast.success(`Saved slot "${slotKey}"`)
       }
       void refreshStorageSlots()
     } catch (error) {
       if (!options?.silent) {
-        setToast('Save failed')
+        toast.error('Save failed')
       }
     }
   }
@@ -3794,10 +4246,10 @@ function App() {
         tx.oncomplete = () => resolve(null)
         tx.onerror = () => reject(tx.error)
       })
-      setToast(`Deleted slot "${slotKey}"`)
+      toast.success(`Deleted slot "${slotKey}"`)
       void refreshStorageSlots()
     } catch (error) {
-      setToast('Delete failed')
+      toast.error('Delete failed')
     }
   }
 
@@ -3814,7 +4266,7 @@ function App() {
       })
       void refreshStorageSlots()
     } catch (error) {
-      setToast('Clear failed')
+      toast.error('Clear failed')
     }
   }
 
@@ -3850,7 +4302,7 @@ function App() {
 
       if (!record?.nodes || !record?.connections) {
         if (!options?.silent) {
-          setToast('Loaded example graph')
+          toast.success('Loaded example graph')
         }
         Object.values(objectUrlRef.current).forEach((url) => URL.revokeObjectURL(url))
         objectUrlRef.current = {}
@@ -3929,27 +4381,29 @@ function App() {
         isHydratingRef.current = false
       }, 0)
       if (!options?.silent) {
-        setToast(`Loaded slot "${slotKey}"`)
+        toast.success(`Loaded slot "${slotKey}"`)
       }
       void refreshStorageSlots()
     } catch (error) {
       if (!options?.silent) {
-        setToast('Load failed')
+        toast.error('Load failed')
       }
       isHydratingRef.current = false
     }
   }
 
   useEffect(() => {
+    if (disablePersistence) return
     const lastSlot = localStorage.getItem(lastSlotStorageKey)
     if (!lastSlot) return
     const normalized = normalizeSlot(lastSlot)
     setStorageSlot(normalized)
-  }, [])
+  }, [disablePersistence])
 
   useEffect(() => {
+    if (disablePersistence) return
     localStorage.setItem(lastSlotStorageKey, storageSlot)
-  }, [storageSlot, lastSlotStorageKey])
+  }, [storageSlot, lastSlotStorageKey, disablePersistence])
 
   useEffect(() => {
     if (!storageSlot) return
@@ -3971,11 +4425,33 @@ function App() {
   }, [storageSlot])
 
   useEffect(() => {
+    if (disablePersistence) {
+      if (initialGraph) {
+        pendingExampleLayoutRef.current = true
+        setNodes(initialGraph.nodes as GraphNode[])
+        setConnections(initialGraph.connections as GraphConnection[])
+        setGroups((initialGraph.groups ?? []) as GraphGroup[])
+        setFunctions((initialGraph.functions ?? {}) as Record<string, FunctionDefinition>)
+        setPaletteOpen((prev) => ({
+          ...prev,
+          ...(initialGraph.ui?.paletteOpen ?? {}),
+        }))
+      } else {
+        setNodes([])
+        setConnections([])
+        setGroups([])
+        setFunctions({})
+      }
+      setSelectedNodeIds([])
+      return
+    }
     if (!storageSlot) return
     void loadGraphWithSlot(normalizeSlot(storageSlot), { silent: true })
-  }, [storageSlot])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storageSlot, disablePersistence])
 
   useEffect(() => {
+    if (disablePersistence) return
     if (isHydratingRef.current || isDraggingNodesRef.current) return
     if (autoSaveTimerRef.current) {
       window.clearTimeout(autoSaveTimerRef.current)
@@ -3988,11 +4464,11 @@ function App() {
         window.clearTimeout(autoSaveTimerRef.current)
       }
     }
-  }, [nodes, connections, groups, functions, paletteOpen, storageSlot])
+  }, [nodes, connections, groups, functions, paletteOpen, storageSlot, disablePersistence])
 
   const groupSelectedNodes = () => {
     if (isFunctionEditing) {
-      setToast('Grouping is only available in the main graph')
+      toast.warning('Grouping is only available in the main graph')
       return
     }
     if (!selectedNodeIds.length) return
@@ -4015,6 +4491,45 @@ function App() {
         },
       ]
     })
+  }
+
+  const handleLoadPreset = async (preset: TSLNodeEditorPreset, index: number) => {
+    if (nodes.length > 0) {
+      if (!window.confirm(`Load preset "${preset.name}"? This will replace your current graph.`)) {
+        return
+      }
+    }
+    let graph: TSLNodeEditorGraph
+    if (isUrlPreset(preset)) {
+      setLoadingPresetIndex(index)
+      try {
+        const response = await fetch(preset.url)
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        const data = await response.json()
+        if (!data.nodes || !data.connections) {
+          throw new Error('Invalid graph data')
+        }
+        graph = data as TSLNodeEditorGraph
+      } catch (error) {
+        toast.error(`Failed to load preset: ${error instanceof Error ? error.message : 'Unknown error'}`)
+        setLoadingPresetIndex(null)
+        return
+      }
+      setLoadingPresetIndex(null)
+    } else {
+      graph = preset.graph
+    }
+    pendingExampleLayoutRef.current = true
+    setNodes(graph.nodes as GraphNode[])
+    setConnections(graph.connections as GraphConnection[])
+    setGroups((graph.groups ?? []) as GraphGroup[])
+    setFunctions((graph.functions ?? {}) as Record<string, FunctionDefinition>)
+    setPaletteOpen((prev) => ({
+      ...prev,
+      ...(graph.ui?.paletteOpen ?? {}),
+    }))
+    setSelectedNodeIds([])
+    toast.success(`Loaded preset: ${preset.name}`)
   }
 
   const buildUniqueName = (base: string, used: Set<string>) => {
@@ -4171,7 +4686,7 @@ function App() {
     const functionId = fnNode.functionId
     const def = functions[functionId]
     if (!def) {
-      setToast('Function not found')
+      toast.error('Function not found')
       return
     }
     const inputNodeIds = new Set(def.inputs.map((pin) => pin.nodeId))
@@ -4180,7 +4695,7 @@ function App() {
       (node) => !inputNodeIds.has(node.id) && !outputNodeIds.has(node.id),
     )
     if (!internalNodes.length) {
-      setToast('Function has no internal nodes')
+      toast.warning('Function has no internal nodes')
       return
     }
     const prefix = `expand-${fnNode.id}-${Date.now()}-`
@@ -4302,7 +4817,7 @@ function App() {
 
   const ungroupSelectedNodes = () => {
     if (isFunctionEditing) {
-      setToast('Ungroup is only available in the main graph')
+      toast.warning('Ungroup is only available in the main graph')
       return
     }
     if (!selectedNodeIds.length) return
@@ -4390,7 +4905,7 @@ function App() {
       if (!activeFunctionId || !activeFunction) return false
       const trimmed = nextName.trim()
       if (!trimmed) {
-        setToast('Pin name cannot be empty')
+        toast.warning('Pin name cannot be empty')
         return false
       }
       const pins = kind === 'input' ? activeFunction.inputs : activeFunction.outputs
@@ -4398,7 +4913,7 @@ function App() {
       if (!current) return false
       if (current.name === trimmed) return true
       if (pins.some((pin, idx) => pin.name === trimmed && idx !== index)) {
-        setToast('Pin name already exists')
+        toast.warning('Pin name already exists')
         return false
       }
       const renameMap = { [current.name]: trimmed }
@@ -4768,14 +5283,6 @@ function App() {
     )
   }, [nodes])
 
-  useEffect(() => {
-    if (!toast) return
-    const timer = window.setTimeout(() => {
-      setToast(null)
-    }, 1800)
-    return () => window.clearTimeout(timer)
-  }, [toast])
-
   const undo = useCallback(() => {
     const history = historyRef.current
     if (!history.last || history.past.length === 0) return
@@ -4885,37 +5392,54 @@ function App() {
         redo()
         return
       }
-      if (!selectedNodeIds.length) return
       if (event.key === 'Backspace' || event.key === 'Delete') {
-        event.preventDefault()
-        if (!isFunctionEditing) {
-          removeFunctionsForNodeIds(selectedNodeIds)
-        }
-        setEditorNodes((prev) => prev.filter((node) => !selectedNodeIds.includes(node.id)))
-        setEditorConnections((prev) =>
-          prev.filter(
-            (connection) =>
-              !selectedNodeIds.includes(connection.from.nodeId) &&
-              !selectedNodeIds.includes(connection.to.nodeId),
-          ),
-        )
-        if (!isFunctionEditing) {
-          setGroups((prev) =>
-            prev
-              .map((group) => ({
-                ...group,
-                nodeIds: group.nodeIds.filter((id) => !selectedNodeIds.includes(id)),
-              }))
-              .filter((group) => group.nodeIds.length > 0),
+        if (selectedNodeIds.length) {
+          event.preventDefault()
+          if (!isFunctionEditing) {
+            removeFunctionsForNodeIds(selectedNodeIds)
+          }
+          setEditorNodes((prev) => prev.filter((node) => !selectedNodeIds.includes(node.id)))
+          setEditorConnections((prev) =>
+            prev.filter(
+              (connection) =>
+                !selectedNodeIds.includes(connection.from.nodeId) &&
+                !selectedNodeIds.includes(connection.to.nodeId),
+            ),
           )
+          if (!isFunctionEditing) {
+            setGroups((prev) =>
+              prev
+                .map((group) => ({
+                  ...group,
+                  nodeIds: group.nodeIds.filter((id) => !selectedNodeIds.includes(id)),
+                }))
+                .filter((group) => group.nodeIds.length > 0),
+            )
+          }
+          setSelectedNodeIds([])
+          setSelectedConnectionIds([])
+          return
         }
-        setSelectedNodeIds([])
+        if (!selectedConnectionIds.length) return
+        event.preventDefault()
+        setEditorConnections((prev) =>
+          prev.filter((connection) => !selectedConnectionIds.includes(connection.id)),
+        )
+        setSelectedConnectionIds([])
       }
     }
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [redo, selectedNodeIds, undo, isFunctionEditing, setEditorConnections, setEditorNodes])
+  }, [
+    redo,
+    selectedConnectionIds,
+    selectedNodeIds,
+    undo,
+    isFunctionEditing,
+    setEditorConnections,
+    setEditorNodes,
+  ])
 
   const parseNumber = (value: number | string | undefined) => {
     if (typeof value === 'number') return value
@@ -6659,6 +7183,372 @@ function App() {
         return wrapColorResult(nodeResult, input)
       }
 
+      // --- Hash / Random ---
+      if (
+        node.type === 'hash' ||
+        node.type === 'rand' ||
+        node.type === 'interleavedGradientNoise'
+      ) {
+        const input = getInput(node.type === 'hash' ? 'value' : 'uv')
+        const coord = input ? toVec2Node(input) : uv()
+        const fn = node.type === 'hash' ? hash : node.type === 'rand' ? rand : interleavedGradientNoise
+        const nodeResult = fn(coord)
+        stack.delete(nodeId)
+        return { node: nodeResult, kind: 'number' }
+      }
+      // --- Blend Modes ---
+      if (
+        node.type === 'blendBurn' ||
+        node.type === 'blendDodge' ||
+        node.type === 'blendScreen' ||
+        node.type === 'blendOverlay' ||
+        node.type === 'blendColor'
+      ) {
+        const baseInput = getInput('base')
+        const blendInput = getInput('blend')
+        const base = resolveColorSource(baseInput)
+        const blend = resolveColorSource(blendInput)
+        const fn =
+          node.type === 'blendBurn' ? blendBurn
+          : node.type === 'blendDodge' ? blendDodge
+          : node.type === 'blendScreen' ? blendScreen
+          : node.type === 'blendOverlay' ? blendOverlay
+          : blendColor
+        const nodeResult = fn(base, blend)
+        stack.delete(nodeId)
+        return wrapColorResult(nodeResult, baseInput)
+      }
+      // --- Premultiply ---
+      if (node.type === 'premultiplyAlpha' || node.type === 'unpremultiplyAlpha') {
+        const input = getInput('value')
+        if (input && (input.kind === 'number' || isVectorKind(input.kind))) {
+          const fn = node.type === 'premultiplyAlpha' ? premultiplyAlpha : unpremultiplyAlpha
+          const nodeResult = fn(input.node)
+          stack.delete(nodeId)
+          return { node: nodeResult, kind: input.kind }
+        }
+        stack.delete(nodeId)
+        return { node: float(0), kind: 'number' }
+      }
+      // --- Color Adjustment ---
+      if (node.type === 'hue' || node.type === 'vibrance') {
+        const input = getInput('value')
+        const amountInput = getInput('amount')
+        const source = resolveColorSource(input)
+        const amount = amountInput?.kind === 'number' ? amountInput.node : float(1)
+        const fn = node.type === 'hue' ? hue : vibrance
+        const nodeResult = fn(source, amount)
+        stack.delete(nodeId)
+        return wrapColorResult(nodeResult, input)
+      }
+      if (node.type === 'cdl') {
+        const input = getInput('value')
+        const powerInput = getInput('power')
+        const slopeInput = getInput('slope')
+        const offsetInput = getInput('offset')
+        const source = resolveColorSource(input)
+        const powerVal = powerInput ? toVec3Node(powerInput) : vec3(1, 1, 1)
+        const slopeVal = slopeInput ? toVec3Node(slopeInput) : vec3(1, 1, 1)
+        const offsetVal = offsetInput ? toVec3Node(offsetInput) : vec3(0, 0, 0)
+        const nodeResult = cdl(source, powerVal, slopeVal, offsetVal)
+        stack.delete(nodeId)
+        return wrapColorResult(nodeResult, input)
+      }
+      if (node.type === 'mxContrast') {
+        const input = getInput('value')
+        const amountInput = getInput('amount')
+        const pivotInput = getInput('pivot')
+        const source = resolveColorSource(input)
+        const amount = amountInput?.kind === 'number' ? amountInput.node : float(1)
+        const pivot = pivotInput?.kind === 'number' ? pivotInput.node : float(0.5)
+        const nodeResult = mx_contrast(source, amount, pivot)
+        stack.delete(nodeId)
+        return wrapColorResult(nodeResult, input)
+      }
+      // --- HSV Conversion ---
+      if (node.type === 'mxHsvToRgb' || node.type === 'mxRgbToHsv') {
+        const input = getInput('value')
+        const source = input ? toVec3Node(input) : vec3(0, 0, 0)
+        const fn = node.type === 'mxHsvToRgb' ? mx_hsvtorgb : mx_rgbtohsv
+        const nodeResult = fn(source)
+        stack.delete(nodeId)
+        return { node: nodeResult, kind: 'vec3' }
+      }
+      // --- Oscillators ---
+      if (
+        node.type === 'oscSine' ||
+        node.type === 'oscSquare' ||
+        node.type === 'oscTriangle' ||
+        node.type === 'oscSawtooth'
+      ) {
+        const input = getInput('value')
+        if (input && (input.kind === 'number' || isVectorKind(input.kind))) {
+          const fn =
+            node.type === 'oscSine' ? oscSine
+            : node.type === 'oscSquare' ? oscSquare
+            : node.type === 'oscTriangle' ? oscTriangle
+            : oscSawtooth
+          const nodeResult = fn(input.node)
+          stack.delete(nodeId)
+          return { node: nodeResult, kind: input.kind }
+        }
+        stack.delete(nodeId)
+        return { node: float(0), kind: 'number' }
+      }
+      // --- Shaping Functions ---
+      if (node.type === 'parabola' || node.type === 'gain' || node.type === 'sinc') {
+        const input = getInput('value')
+        const kInput = getInput('k')
+        if (input && (input.kind === 'number' || isVectorKind(input.kind))) {
+          const k = kInput?.kind === 'number' ? kInput.node : float(1)
+          const fn =
+            node.type === 'parabola' ? parabola
+            : node.type === 'gain' ? gain
+            : sinc
+          const nodeResult = fn(input.node, k)
+          stack.delete(nodeId)
+          return { node: nodeResult, kind: input.kind }
+        }
+        stack.delete(nodeId)
+        return { node: float(0), kind: 'number' }
+      }
+      if (node.type === 'pcurve') {
+        const input = getInput('value')
+        const aInput = getInput('a')
+        const bInput = getInput('b')
+        if (input && (input.kind === 'number' || isVectorKind(input.kind))) {
+          const a = aInput?.kind === 'number' ? aInput.node : float(1)
+          const b = bInput?.kind === 'number' ? bInput.node : float(1)
+          const nodeResult = pcurve(input.node, a, b)
+          stack.delete(nodeId)
+          return { node: nodeResult, kind: input.kind }
+        }
+        stack.delete(nodeId)
+        return { node: float(0), kind: 'number' }
+      }
+      // --- Cell Noise ---
+      if (node.type === 'mxCellNoiseFloat') {
+        const texcoord = getInput('texcoord')
+        const coordNode = texcoord
+          ? texcoord.kind === 'vec3' || texcoord.kind === 'color' || texcoord.kind === 'vec4'
+            ? toVec3Node(texcoord)
+            : toVec2Node(texcoord)
+          : uv()
+        const nodeResult = mx_cell_noise_float(coordNode)
+        stack.delete(nodeId)
+        return { node: nodeResult, kind: 'number' }
+      }
+      // --- UV / Coord Utilities ---
+      if (node.type === 'equirectUV') {
+        const input = getInput('direction')
+        const dir = input ? toVec3Node(input) : normalWorld
+        const nodeResult = equirectUV(dir)
+        stack.delete(nodeId)
+        return { node: nodeResult, kind: 'vec2' }
+      }
+      if (node.type === 'parallaxUV') {
+        const uvInput = getInput('uv')
+        const scaleInput = getInput('scale')
+        const uvNode = uvInput ? toVec2Node(uvInput) : uv()
+        const scaleNode = scaleInput?.kind === 'number' ? scaleInput.node : float(0.1)
+        const nodeResult = parallaxUV(uvNode, scaleNode)
+        stack.delete(nodeId)
+        return { node: nodeResult, kind: 'vec2' }
+      }
+      if (node.type === 'mxRotate2d') {
+        const input = getInput('value')
+        const angleInput = getInput('angle')
+        const valueNode = input ? toVec2Node(input) : uv()
+        const angleNode = angleInput?.kind === 'number' ? angleInput.node : float(0)
+        const nodeResult = mx_rotate2d(valueNode, angleNode)
+        stack.delete(nodeId)
+        return { node: nodeResult, kind: 'vec2' }
+      }
+      // --- Normal Mapping ---
+      if (node.type === 'bumpMap') {
+        const input = getInput('value')
+        const scaleInput = getInput('scale')
+        const valueNode = input?.kind === 'number' ? input.node : float(0)
+        const scaleNode = scaleInput?.kind === 'number' ? scaleInput.node : float(1)
+        const nodeResult = bumpMap(valueNode, scaleNode)
+        stack.delete(nodeId)
+        return { node: nodeResult, kind: 'vec3' }
+      }
+      if (node.type === 'mxHeightToNormal') {
+        const input = getInput('value')
+        const scaleInput = getInput('scale')
+        const valueNode = input?.kind === 'number' ? input.node : float(0)
+        const scaleNode = scaleInput?.kind === 'number' ? scaleInput.node : float(1)
+        const nodeResult = mx_heighttonormal(valueNode, scaleNode)
+        stack.delete(nodeId)
+        return { node: nodeResult, kind: 'vec3' }
+      }
+      // --- Gradients ---
+      if (node.type === 'mxRampLR' || node.type === 'mxRampTB') {
+        const inputA = getInput('a') ?? { node: float(0), kind: 'number' as const }
+        const inputB = getInput('b') ?? { node: float(1), kind: 'number' as const }
+        const coordInput = getInput('coord')
+        const coordNode = coordInput ? toVec2Node(coordInput) : uv()
+        const combined = combineTypes(inputA.kind, inputB.kind)
+        if (combined === 'number') {
+          const fn = node.type === 'mxRampLR' ? mx_ramplr : mx_ramptb
+          const nodeResult = fn(inputA.node, inputB.node, coordNode)
+          stack.delete(nodeId)
+          return { node: nodeResult, kind: 'number' }
+        }
+        if (combined === 'color' || combined === 'vec2' || combined === 'vec3' || combined === 'vec4') {
+          const a = toVectorNode(inputA, combined)
+          const b = toVectorNode(inputB, combined)
+          const fn = node.type === 'mxRampLR' ? mx_ramplr : mx_ramptb
+          const nodeResult = fn(a, b, coordNode)
+          stack.delete(nodeId)
+          return { node: nodeResult, kind: combined }
+        }
+        stack.delete(nodeId)
+        return { node: float(0), kind: 'number' }
+      }
+      if (node.type === 'mxRamp4') {
+        const tl = getInput('tl') ?? { node: float(0), kind: 'number' as const }
+        const tr = getInput('tr') ?? { node: float(1), kind: 'number' as const }
+        const bl = getInput('bl') ?? { node: float(0), kind: 'number' as const }
+        const br = getInput('br') ?? { node: float(1), kind: 'number' as const }
+        const coordInput = getInput('coord')
+        const coordNode = coordInput ? toVec2Node(coordInput) : uv()
+        const combined = combineTypes(
+          combineTypes(tl.kind, tr.kind),
+          combineTypes(bl.kind, br.kind)
+        )
+        if (combined === 'number') {
+          const nodeResult = mx_ramp4(tl.node, tr.node, bl.node, br.node, coordNode)
+          stack.delete(nodeId)
+          return { node: nodeResult, kind: 'number' }
+        }
+        if (combined === 'color' || combined === 'vec2' || combined === 'vec3' || combined === 'vec4') {
+          const nodeResult = mx_ramp4(
+            toVectorNode(tl, combined),
+            toVectorNode(tr, combined),
+            toVectorNode(bl, combined),
+            toVectorNode(br, combined),
+            coordNode
+          )
+          stack.delete(nodeId)
+          return { node: nodeResult, kind: combined }
+        }
+        stack.delete(nodeId)
+        return { node: float(0), kind: 'number' }
+      }
+      if (node.type === 'mxSplitLR' || node.type === 'mxSplitTB') {
+        const inputA = getInput('a') ?? { node: float(0), kind: 'number' as const }
+        const inputB = getInput('b') ?? { node: float(1), kind: 'number' as const }
+        const centerInput = getInput('center')
+        const coordInput = getInput('coord')
+        const centerNode = centerInput?.kind === 'number' ? centerInput.node : float(0.5)
+        const coordNode = coordInput ? toVec2Node(coordInput) : uv()
+        const combined = combineTypes(inputA.kind, inputB.kind)
+        if (combined === 'number') {
+          const fn = node.type === 'mxSplitLR' ? mx_splitlr : mx_splittb
+          const nodeResult = fn(inputA.node, inputB.node, centerNode, coordNode)
+          stack.delete(nodeId)
+          return { node: nodeResult, kind: 'number' }
+        }
+        if (combined === 'color' || combined === 'vec2' || combined === 'vec3' || combined === 'vec4') {
+          const fn = node.type === 'mxSplitLR' ? mx_splitlr : mx_splittb
+          const nodeResult = fn(
+            toVectorNode(inputA, combined),
+            toVectorNode(inputB, combined),
+            centerNode,
+            coordNode
+          )
+          stack.delete(nodeId)
+          return { node: nodeResult, kind: combined }
+        }
+        stack.delete(nodeId)
+        return { node: float(0), kind: 'number' }
+      }
+      // --- Math / Misc ---
+      if (
+        node.type === 'reciprocal' ||
+        node.type === 'cbrt' ||
+        node.type === 'inverseSqrt'
+      ) {
+        const input = getInput('value')
+        if (input && (input.kind === 'number' || isVectorKind(input.kind))) {
+          const fn =
+            node.type === 'reciprocal' ? reciprocal
+            : node.type === 'cbrt' ? cbrt
+            : inverseSqrt
+          const nodeResult = fn(input.node)
+          stack.delete(nodeId)
+          return { node: nodeResult, kind: input.kind }
+        }
+        stack.delete(nodeId)
+        return { node: float(0), kind: 'number' }
+      }
+      if (node.type === 'lengthSq') {
+        const input = getInput('value')
+        if (input && isVectorKind(input.kind)) {
+          const nodeResult = lengthSq(input.node)
+          stack.delete(nodeId)
+          return { node: nodeResult, kind: 'number' }
+        }
+        stack.delete(nodeId)
+        return { node: float(0), kind: 'number' }
+      }
+      if (node.type === 'difference') {
+        const inputA = getInput('a') ?? { node: float(0), kind: 'number' as const }
+        const inputB = getInput('b') ?? { node: float(0), kind: 'number' as const }
+        const combined = combineTypes(inputA.kind, inputB.kind)
+        if (combined === 'number') {
+          const nodeResult = difference(inputA.node, inputB.node)
+          stack.delete(nodeId)
+          return { node: nodeResult, kind: 'number' }
+        }
+        if (combined === 'color' || combined === 'vec2' || combined === 'vec3' || combined === 'vec4') {
+          const nodeA = toVectorNode(inputA, combined)
+          const nodeB = toVectorNode(inputB, combined)
+          const nodeResult = difference(nodeA, nodeB)
+          stack.delete(nodeId)
+          return { node: nodeResult, kind: combined }
+        }
+        stack.delete(nodeId)
+        return { node: float(0), kind: 'number' }
+      }
+      if (node.type === 'mxAastep') {
+        const thresholdInput = getInput('threshold')
+        const valueInput = getInput('value')
+        const thresholdNode = thresholdInput?.kind === 'number' ? thresholdInput.node : float(0.5)
+        const valueNode = valueInput?.kind === 'number' ? valueInput.node : float(0)
+        const nodeResult = mx_aastep(thresholdNode, valueNode)
+        stack.delete(nodeId)
+        return { node: nodeResult, kind: 'number' }
+      }
+      if (node.type === 'mxSafepower') {
+        const valueInput = getInput('value')
+        const expInput = getInput('exp')
+        const valueNode = valueInput?.kind === 'number' ? valueInput.node : float(0)
+        const expNode = expInput?.kind === 'number' ? expInput.node : float(1)
+        const nodeResult = mx_safepower(valueNode, expNode)
+        stack.delete(nodeId)
+        return { node: nodeResult, kind: 'number' }
+      }
+      if (node.type === 'shapeCircle') {
+        const uvInput = getInput('uv')
+        const radiusInput = getInput('radius')
+        const uvNode = uvInput ? toVec2Node(uvInput) : uv()
+        const radiusNode = radiusInput?.kind === 'number' ? radiusInput.node : float(0.5)
+        const nodeResult = (shapeCircle as (uv: unknown, radius: unknown) => unknown)(uvNode, radiusNode) as ReturnType<typeof shapeCircle>
+        stack.delete(nodeId)
+        return { node: nodeResult, kind: 'number' }
+      }
+      if (node.type === 'directionToColor' || node.type === 'colorToDirection') {
+        const input = getInput('value')
+        const source = input ? toVec3Node(input) : vec3(0, 0, 0)
+        const fn = node.type === 'directionToColor' ? directionToColor : colorToDirection
+        const nodeResult = fn(source)
+        stack.delete(nodeId)
+        return { node: nodeResult, kind: 'vec3' }
+      }
+
       if (node.type === 'gltfMaterial') {
         const pin = outputPin ?? 'baseColor'
         const entry = gltfMapRef.current[node.id]
@@ -6799,6 +7689,22 @@ function App() {
         stack.delete(nodeId)
         return fallbackColorNode()
       }
+      if (node.type === 'rangeFogFactor') {
+        const nearInput = getInput('near')
+        const farInput = getInput('far')
+        const nearNode = nearInput?.kind === 'number' ? nearInput.node : float(0)
+        const farNode = farInput?.kind === 'number' ? farInput.node : float(100)
+        const nodeResult = rangeFogFactor(nearNode, farNode)
+        stack.delete(nodeId)
+        return { node: nodeResult, kind: 'number' }
+      }
+      if (node.type === 'densityFogFactor') {
+        const densityInput = getInput('density')
+        const densityNode = densityInput?.kind === 'number' ? densityInput.node : float(0.00025)
+        const nodeResult = densityFogFactor(densityNode)
+        stack.delete(nodeId)
+        return { node: nodeResult, kind: 'number' }
+      }
       if (node.type === 'material' || node.type === 'physicalMaterial') {
         const pin = outputPin ?? 'baseColor'
         const input = getInput(pin)
@@ -6883,6 +7789,53 @@ function App() {
         stack.delete(nodeId)
         return { node: fallbackColorUniformRef.current, kind: 'color' }
       }
+      if (node.type === 'toonMaterial' || node.type === 'phongMaterial' || node.type === 'matcapMaterial') {
+        const pin = outputPin ?? 'baseColor'
+        if (pin === 'baseColor') {
+          const input = getInput('baseColor')
+          const texInput = getInput('baseColorTexture')
+          const base =
+            input?.kind === 'color'
+              ? input
+              : input?.kind === 'number'
+                ? { node: color(input.node), kind: 'color' as const }
+                : null
+          const tex =
+            texInput?.kind === 'color'
+              ? texInput
+              : texInput?.kind === 'number'
+                ? { node: color(texInput.node), kind: 'color' as const }
+                : null
+          if (base && tex) {
+            stack.delete(nodeId)
+            return { node: base.node.mul(tex.node), kind: 'color' }
+          }
+          if (base) {
+            stack.delete(nodeId)
+            return base
+          }
+          if (tex) {
+            stack.delete(nodeId)
+            return tex
+          }
+        }
+        if (!fallbackColorUniformRef.current) {
+          fallbackColorUniformRef.current = uniform(new Color(fallbackColor))
+        } else {
+          ;(fallbackColorUniformRef.current.value as Color).set(fallbackColor)
+        }
+        stack.delete(nodeId)
+        return { node: fallbackColorUniformRef.current, kind: 'color' }
+      }
+      if (node.type === 'normalMaterial') {
+        if (!fallbackColorUniformRef.current) {
+          fallbackColorUniformRef.current = uniform(new Color(fallbackColor))
+        } else {
+          ;(fallbackColorUniformRef.current.value as Color).set(fallbackColor)
+        }
+        stack.delete(nodeId)
+        return { node: fallbackColorUniformRef.current, kind: 'color' }
+      }
       if (node.type === 'output') {
         const input = getInput('baseColor')
         stack.delete(nodeId)
@@ -6938,6 +7891,7 @@ function App() {
       const attributeKind = getAttributeKind(node.type)
       if (attributeKind) {
         stack.delete(nodeId)
+        if (attributeKind === 'number') return { kind: 'number', value: 0 }
         return { kind: attributeKind, value: new Color(0, 0, 0) }
       }
       if (node.type === 'color') {
@@ -8198,6 +9152,241 @@ function App() {
         stack.delete(nodeId)
         return { kind, value }
       }
+      // --- Hash / Random (return default 0.5) ---
+      if (
+        node.type === 'hash' ||
+        node.type === 'rand' ||
+        node.type === 'interleavedGradientNoise' ||
+        node.type === 'mxCellNoiseFloat'
+      ) {
+        stack.delete(nodeId)
+        return { kind: 'number', value: 0.5 }
+      }
+      // --- Blend Modes (return base color) ---
+      if (
+        node.type === 'blendBurn' ||
+        node.type === 'blendDodge' ||
+        node.type === 'blendScreen' ||
+        node.type === 'blendOverlay' ||
+        node.type === 'blendColor'
+      ) {
+        const input = getInput('base')
+        const colorValue = toColorValue(input)
+        const kind = input?.kind === 'vec3' ? 'vec3' : 'color'
+        stack.delete(nodeId)
+        return { kind, value: colorValue }
+      }
+      // --- Premultiply (pass through) ---
+      if (node.type === 'premultiplyAlpha' || node.type === 'unpremultiplyAlpha') {
+        const input = getInput('value')
+        if (input) {
+          stack.delete(nodeId)
+          return input
+        }
+        stack.delete(nodeId)
+        return { kind: 'number', value: 0 }
+      }
+      // --- Color Adjustment (return color) ---
+      if (node.type === 'hue' || node.type === 'vibrance' || node.type === 'cdl' || node.type === 'mxContrast') {
+        const input = getInput('value')
+        const colorValue = toColorValue(input)
+        const kind = input?.kind === 'vec3' ? 'vec3' : 'color'
+        stack.delete(nodeId)
+        return { kind, value: colorValue }
+      }
+      // --- HSV Conversion (return default vec3) ---
+      if (node.type === 'mxHsvToRgb' || node.type === 'mxRgbToHsv') {
+        const input = getInput('value')
+        const colorValue = toColorValue(input)
+        stack.delete(nodeId)
+        return { kind: 'vec3', value: colorValue }
+      }
+      // --- Oscillators (approximate) ---
+      if (
+        node.type === 'oscSine' ||
+        node.type === 'oscSquare' ||
+        node.type === 'oscTriangle' ||
+        node.type === 'oscSawtooth'
+      ) {
+        const input = getInput('value')
+        if (!input || input.kind !== 'number') {
+          stack.delete(nodeId)
+          return { kind: 'number', value: 0.5 }
+        }
+        const t = input.value as number
+        let value: number
+        if (node.type === 'oscSine') {
+          value = Math.sin(t * Math.PI * 2) * 0.5 + 0.5
+        } else if (node.type === 'oscSquare') {
+          value = Math.sin(t * Math.PI * 2) >= 0 ? 1 : 0
+        } else if (node.type === 'oscTriangle') {
+          value = 1 - Math.abs(2 * (t % 1) - 1)
+        } else {
+          value = t % 1
+        }
+        stack.delete(nodeId)
+        return { kind: 'number', value }
+      }
+      // --- Shaping Functions ---
+      if (node.type === 'parabola' || node.type === 'gain' || node.type === 'sinc') {
+        const input = getInput('value')
+        if (!input || input.kind !== 'number') {
+          stack.delete(nodeId)
+          return { kind: 'number', value: 0 }
+        }
+        const x = input.value as number
+        const kInput = getInput('k')
+        const k = kInput?.kind === 'number' ? (kInput.value as number) : 1
+        let value: number
+        if (node.type === 'parabola') {
+          value = Math.pow(4 * x * (1 - x), k)
+        } else if (node.type === 'gain') {
+          value = x < 0.5
+            ? 0.5 * Math.pow(2 * x, k)
+            : 1 - 0.5 * Math.pow(2 * (1 - x), k)
+        } else {
+          value = k === 0 ? 1 : Math.sin(Math.PI * k * x) / (Math.PI * k * x || 1)
+        }
+        stack.delete(nodeId)
+        return { kind: 'number', value }
+      }
+      if (node.type === 'pcurve') {
+        const input = getInput('value')
+        if (!input || input.kind !== 'number') {
+          stack.delete(nodeId)
+          return { kind: 'number', value: 0 }
+        }
+        stack.delete(nodeId)
+        return { kind: 'number', value: input.value as number }
+      }
+      // --- UV / Coord ---
+      if (node.type === 'equirectUV' || node.type === 'parallaxUV' || node.type === 'mxRotate2d') {
+        stack.delete(nodeId)
+        return { kind: 'vec2', value: new Color(0.5, 0.5, 0) }
+      }
+      // --- Normal Mapping ---
+      if (node.type === 'bumpMap' || node.type === 'mxHeightToNormal') {
+        stack.delete(nodeId)
+        return { kind: 'vec3', value: new Color(0.5, 0.5, 1) }
+      }
+      // --- Gradients (return mix of a and b at 0.5) ---
+      if (
+        node.type === 'mxRampLR' ||
+        node.type === 'mxRampTB' ||
+        node.type === 'mxSplitLR' ||
+        node.type === 'mxSplitTB'
+      ) {
+        const inputA = getInput('a')
+        const inputB = getInput('b')
+        if (inputA && inputB) {
+          if (inputA.kind === 'number' && inputB.kind === 'number') {
+            const value = ((inputA.value as number) + (inputB.value as number)) / 2
+            stack.delete(nodeId)
+            return { kind: 'number', value }
+          }
+          const a = toColorValue(inputA)
+          const b = toColorValue(inputB)
+          const value = a.lerp(b, 0.5)
+          const kind = inputA.kind === 'color' || inputB.kind === 'color' ? 'color' : 'vec3'
+          stack.delete(nodeId)
+          return { kind, value }
+        }
+        stack.delete(nodeId)
+        return { kind: 'number', value: 0.5 }
+      }
+      if (node.type === 'mxRamp4') {
+        stack.delete(nodeId)
+        return { kind: 'number', value: 0.5 }
+      }
+      // --- Math / Misc ---
+      if (node.type === 'reciprocal') {
+        const input = getInput('value')
+        if (input?.kind === 'number') {
+          const v = input.value as number
+          stack.delete(nodeId)
+          return { kind: 'number', value: v !== 0 ? 1 / v : 0 }
+        }
+        stack.delete(nodeId)
+        return { kind: 'number', value: 0 }
+      }
+      if (node.type === 'cbrt') {
+        const input = getInput('value')
+        if (input?.kind === 'number') {
+          stack.delete(nodeId)
+          return { kind: 'number', value: Math.cbrt(input.value as number) }
+        }
+        stack.delete(nodeId)
+        return { kind: 'number', value: 0 }
+      }
+      if (node.type === 'lengthSq') {
+        const input = getInput('value')
+        if (input && isVectorKind(input.kind)) {
+          const colorValue = toColorValue(input)
+          const value = colorValue.r * colorValue.r + colorValue.g * colorValue.g + colorValue.b * colorValue.b
+          stack.delete(nodeId)
+          return { kind: 'number', value }
+        }
+        stack.delete(nodeId)
+        return { kind: 'number', value: 0 }
+      }
+      if (node.type === 'difference') {
+        const inputA = getInput('a')
+        const inputB = getInput('b')
+        if (inputA?.kind === 'number' && inputB?.kind === 'number') {
+          stack.delete(nodeId)
+          return { kind: 'number', value: Math.abs((inputA.value as number) - (inputB.value as number)) }
+        }
+        if (inputA && inputB) {
+          const a = toColorValue(inputA)
+          const b = toColorValue(inputB)
+          const value = new Color(Math.abs(a.r - b.r), Math.abs(a.g - b.g), Math.abs(a.b - b.b))
+          const combined = combineTypes(inputA.kind, inputB.kind)
+          stack.delete(nodeId)
+          return { kind: combined === 'color' ? 'color' : 'vec3', value }
+        }
+        stack.delete(nodeId)
+        return { kind: 'number', value: 0 }
+      }
+      if (node.type === 'inverseSqrt') {
+        const input = getInput('value')
+        if (input?.kind === 'number') {
+          const v = input.value as number
+          stack.delete(nodeId)
+          return { kind: 'number', value: v > 0 ? 1 / Math.sqrt(v) : 0 }
+        }
+        stack.delete(nodeId)
+        return { kind: 'number', value: 0 }
+      }
+      if (node.type === 'mxAastep') {
+        const threshold = getInput('threshold')
+        const value = getInput('value')
+        const t = threshold?.kind === 'number' ? (threshold.value as number) : 0.5
+        const v = value?.kind === 'number' ? (value.value as number) : 0
+        stack.delete(nodeId)
+        return { kind: 'number', value: v >= t ? 1 : 0 }
+      }
+      if (node.type === 'mxSafepower') {
+        const value = getInput('value')
+        const expInput = getInput('exp')
+        const v = value?.kind === 'number' ? (value.value as number) : 0
+        const e = expInput?.kind === 'number' ? (expInput.value as number) : 1
+        stack.delete(nodeId)
+        return { kind: 'number', value: Math.pow(Math.abs(v), e) }
+      }
+      if (node.type === 'shapeCircle') {
+        stack.delete(nodeId)
+        return { kind: 'number', value: 1 }
+      }
+      if (node.type === 'directionToColor' || node.type === 'colorToDirection') {
+        const input = getInput('value')
+        const colorValue = toColorValue(input)
+        stack.delete(nodeId)
+        return { kind: 'vec3', value: colorValue }
+      }
+      if (node.type === 'rangeFogFactor' || node.type === 'densityFogFactor') {
+        stack.delete(nodeId)
+        return { kind: 'number', value: 0 }
+      }
       if (node.type === 'material' || node.type === 'physicalMaterial') {
         const pin = outputPin ?? 'baseColor'
         const input = getInput(pin)
@@ -8248,7 +9437,7 @@ function App() {
         }
         return { kind: 'color', value: new Color(FALLBACK_COLOR) }
       }
-      if (node.type === 'basicMaterial') {
+      if (node.type === 'basicMaterial' || node.type === 'toonMaterial' || node.type === 'phongMaterial' || node.type === 'matcapMaterial') {
         const pin = outputPin ?? 'baseColor'
         if (pin === 'baseColor') {
           const input = getInput('baseColor')
@@ -8291,6 +9480,10 @@ function App() {
             return tex
           }
         }
+        stack.delete(nodeId)
+        return { kind: 'color', value: new Color(FALLBACK_COLOR) }
+      }
+      if (node.type === 'normalMaterial') {
         stack.delete(nodeId)
         return { kind: 'color', value: new Color(FALLBACK_COLOR) }
       }
@@ -8389,12 +9582,15 @@ function App() {
     }
 
     const materialKind = getMaterialKindFromOutput(outputNode, nodeMap, connectionMap)
-    const materialClass =
-      materialKind === 'basic'
-        ? 'MeshBasicNodeMaterial'
-        : materialKind === 'physical'
-          ? 'MeshPhysicalNodeMaterial'
-          : 'MeshStandardNodeMaterial'
+    const materialClassMap: Record<string, string> = {
+      basic: 'MeshBasicNodeMaterial',
+      physical: 'MeshPhysicalNodeMaterial',
+      toon: 'MeshToonNodeMaterial',
+      phong: 'MeshPhongNodeMaterial',
+      matcap: 'MeshMatcapNodeMaterial',
+      normal: 'MeshNormalNodeMaterial',
+    }
+    const materialClass = materialClassMap[materialKind] ?? 'MeshStandardNodeMaterial'
 
     const decls: string[] = [`const material = new ${materialClass}();`]
     const cache = new Map<string, ExprResult>()
@@ -8402,7 +9598,7 @@ function App() {
 
     const nextVar = (prefix: string) => `${prefix}_${varIndex++}`
     const asColor = (expr: string, kind: 'color' | 'number') =>
-      kind === 'color' ? expr : `color(${expr}, ${expr}, ${expr})`
+      kind === 'color' ? expr : `vec3(${expr}, ${expr}, ${expr})`
     const asVec2 = (expr: string, kind: 'vec2' | 'number') =>
       kind === 'vec2' ? expr : `vec2(${expr}, ${expr})`
     const asVec3 = (expr: string, kind: 'vec3' | 'number') =>
@@ -12149,6 +13345,464 @@ function App() {
         return out
       }
 
+      if (
+        node.type === 'hash' ||
+        node.type === 'rand' ||
+        node.type === 'interleavedGradientNoise'
+      ) {
+        const input = getInput(node.type === 'hash' ? 'value' : 'uv')
+        const inputExpr = input ? toVec2Expr(input) : 'uv()'
+        const fn = node.type === 'hash' ? 'hash' : node.type === 'rand' ? 'rand' : 'interleavedGradientNoise'
+        const name = nextVar('num')
+        decls.push(`const ${name} = ${fn}(${inputExpr});`)
+        const out = { expr: name, kind: 'number' as const }
+        cache.set(key, out)
+        return out
+      }
+
+      if (
+        node.type === 'blendBurn' ||
+        node.type === 'blendDodge' ||
+        node.type === 'blendScreen' ||
+        node.type === 'blendOverlay' ||
+        node.type === 'blendColor'
+      ) {
+        const base = getInput('base')
+        const blend = getInput('blend')
+        const baseExpr = base ? toVec3Expr(base) : 'vec3(0.0, 0.0, 0.0)'
+        const blendExpr = blend ? toVec3Expr(blend) : 'vec3(1.0, 1.0, 1.0)'
+        const fn = node.type
+        const name = nextVar('col')
+        decls.push(`const ${name} = ${fn}(${baseExpr}, ${blendExpr});`)
+        const kind = (base?.kind === 'color' || !base) ? ('color' as const) : ('vec3' as const)
+        const out = { expr: name, kind }
+        cache.set(key, out)
+        return out
+      }
+
+      if (node.type === 'premultiplyAlpha' || node.type === 'unpremultiplyAlpha') {
+        const input = getInput('value')
+        if (!input || (!isVectorKind(input.kind) && input.kind !== 'number')) {
+          const out = { expr: 'float(0.0)', kind: 'number' as const }
+          cache.set(key, out)
+          return out
+        }
+        const expr = `${node.type}(${input.expr})`
+        const name = nextVar(input.kind === 'number' ? 'num' : 'vec')
+        decls.push(`const ${name} = ${expr};`)
+        const out = { expr: name, kind: input.kind }
+        cache.set(key, out)
+        return out
+      }
+
+      if (node.type === 'hue' || node.type === 'vibrance') {
+        const input = getInput('value')
+        const amountInput = getInput('amount')
+        const sourceExpr = input ? toVec3Expr(input) : 'vec3(0.0, 0.0, 0.0)'
+        const amountExpr = amountInput?.kind === 'number' ? amountInput.expr : 'float(1.0)'
+        const fn = node.type
+        const name = nextVar('col')
+        decls.push(`const ${name} = ${fn}(${sourceExpr}, ${amountExpr});`)
+        const kind = (input?.kind === 'color' || !input) ? ('color' as const) : ('vec3' as const)
+        const out = { expr: name, kind }
+        cache.set(key, out)
+        return out
+      }
+
+      if (node.type === 'cdl') {
+        const input = getInput('value')
+        const power = getInput('power')
+        const slope = getInput('slope')
+        const offset = getInput('offset')
+        const sourceExpr = input ? toVec3Expr(input) : 'vec3(0.0, 0.0, 0.0)'
+        const powerExpr = power ? toVec3Expr(power) : 'vec3(1.0, 1.0, 1.0)'
+        const slopeExpr = slope ? toVec3Expr(slope) : 'vec3(1.0, 1.0, 1.0)'
+        const offsetExpr = offset ? toVec3Expr(offset) : 'vec3(0.0, 0.0, 0.0)'
+        const name = nextVar('col')
+        decls.push(`const ${name} = cdl(${sourceExpr}, ${powerExpr}, ${slopeExpr}, ${offsetExpr});`)
+        const kind = (input?.kind === 'color' || !input) ? ('color' as const) : ('vec3' as const)
+        const out = { expr: name, kind }
+        cache.set(key, out)
+        return out
+      }
+
+      if (node.type === 'mxContrast') {
+        const input = getInput('value')
+        const amount = getInput('amount')
+        const pivot = getInput('pivot')
+        const sourceExpr = input ? toVec3Expr(input) : 'vec3(0.0, 0.0, 0.0)'
+        const amountExpr = amount?.kind === 'number' ? amount.expr : 'float(1.0)'
+        const pivotExpr = pivot?.kind === 'number' ? pivot.expr : 'float(0.5)'
+        const name = nextVar('col')
+        decls.push(`const ${name} = mx_contrast(${sourceExpr}, ${amountExpr}, ${pivotExpr});`)
+        const kind = (input?.kind === 'color' || !input) ? ('color' as const) : ('vec3' as const)
+        const out = { expr: name, kind }
+        cache.set(key, out)
+        return out
+      }
+
+      if (node.type === 'mxHsvToRgb' || node.type === 'mxRgbToHsv') {
+        const input = getInput('value')
+        const sourceExpr = input ? toVec3Expr(input) : 'vec3(0.0, 0.0, 0.0)'
+        const fn = node.type === 'mxHsvToRgb' ? 'mx_hsvtorgb' : 'mx_rgbtohsv'
+        const name = nextVar('vec')
+        decls.push(`const ${name} = ${fn}(${sourceExpr});`)
+        const out = { expr: name, kind: 'vec3' as const }
+        cache.set(key, out)
+        return out
+      }
+
+      if (
+        node.type === 'oscSine' ||
+        node.type === 'oscSquare' ||
+        node.type === 'oscTriangle' ||
+        node.type === 'oscSawtooth'
+      ) {
+        const input = getInput('value')
+        if (!input || (!isVectorKind(input.kind) && input.kind !== 'number')) {
+          const out = { expr: 'float(0.0)', kind: 'number' as const }
+          cache.set(key, out)
+          return out
+        }
+        const expr = `${node.type}(${input.expr})`
+        const name = nextVar(input.kind === 'number' ? 'num' : 'vec')
+        decls.push(`const ${name} = ${expr};`)
+        const out = { expr: name, kind: input.kind }
+        cache.set(key, out)
+        return out
+      }
+
+      if (node.type === 'parabola' || node.type === 'gain' || node.type === 'sinc') {
+        const input = getInput('value')
+        const kInput = getInput('k')
+        if (!input || (!isVectorKind(input.kind) && input.kind !== 'number')) {
+          const out = { expr: 'float(0.0)', kind: 'number' as const }
+          cache.set(key, out)
+          return out
+        }
+        const kExpr = kInput?.kind === 'number' ? kInput.expr : 'float(1.0)'
+        const expr = `${node.type}(${input.expr}, ${kExpr})`
+        const name = nextVar(input.kind === 'number' ? 'num' : 'vec')
+        decls.push(`const ${name} = ${expr};`)
+        const out = { expr: name, kind: input.kind }
+        cache.set(key, out)
+        return out
+      }
+      if (node.type === 'pcurve') {
+        const input = getInput('value')
+        const aInput = getInput('a')
+        const bInput = getInput('b')
+        if (!input || (!isVectorKind(input.kind) && input.kind !== 'number')) {
+          const out = { expr: 'float(0.0)', kind: 'number' as const }
+          cache.set(key, out)
+          return out
+        }
+        const aExpr = aInput?.kind === 'number' ? aInput.expr : 'float(1.0)'
+        const bExpr = bInput?.kind === 'number' ? bInput.expr : 'float(1.0)'
+        const expr = `pcurve(${input.expr}, ${aExpr}, ${bExpr})`
+        const name = nextVar(input.kind === 'number' ? 'num' : 'vec')
+        decls.push(`const ${name} = ${expr};`)
+        const out = { expr: name, kind: input.kind }
+        cache.set(key, out)
+        return out
+      }
+
+      if (node.type === 'mxCellNoiseFloat') {
+        const texcoord = getInput('texcoord')
+        const coordExpr = texcoord
+          ? texcoord.kind === 'vec3' || texcoord.kind === 'color' || texcoord.kind === 'vec4'
+            ? toVec3Expr(texcoord)
+            : toVec2Expr(texcoord)
+          : 'uv()'
+        const name = nextVar('num')
+        decls.push(`const ${name} = mx_cell_noise_float(${coordExpr});`)
+        const out = { expr: name, kind: 'number' as const }
+        cache.set(key, out)
+        return out
+      }
+
+      if (node.type === 'equirectUV') {
+        const input = getInput('direction')
+        const dirExpr = input ? toVec3Expr(input) : 'normalWorld'
+        const name = nextVar('vec')
+        decls.push(`const ${name} = equirectUV(${dirExpr});`)
+        const out = { expr: name, kind: 'vec2' as const }
+        cache.set(key, out)
+        return out
+      }
+      if (node.type === 'parallaxUV') {
+        const uvInput = getInput('uv')
+        const scaleInput = getInput('scale')
+        const uvExpr = toVec2Expr(uvInput ?? { expr: 'uv()', kind: 'vec2' })
+        const scaleExpr = scaleInput?.kind === 'number' ? scaleInput.expr : 'float(0.1)'
+        const name = nextVar('vec')
+        decls.push(`const ${name} = parallaxUV(${uvExpr}, ${scaleExpr});`)
+        const out = { expr: name, kind: 'vec2' as const }
+        cache.set(key, out)
+        return out
+      }
+      if (node.type === 'mxRotate2d') {
+        const input = getInput('value')
+        const angle = getInput('angle')
+        const valueExpr = input ? toVec2Expr(input) : 'uv()'
+        const angleExpr = angle?.kind === 'number' ? angle.expr : 'float(0.0)'
+        const name = nextVar('vec')
+        decls.push(`const ${name} = mx_rotate2d(${valueExpr}, ${angleExpr});`)
+        const out = { expr: name, kind: 'vec2' as const }
+        cache.set(key, out)
+        return out
+      }
+
+      if (node.type === 'bumpMap') {
+        const input = getInput('value')
+        const scaleInput = getInput('scale')
+        const valueExpr = input?.kind === 'number' ? input.expr : 'float(0.0)'
+        const scaleExpr = scaleInput?.kind === 'number' ? scaleInput.expr : 'float(1.0)'
+        const name = nextVar('vec')
+        decls.push(`const ${name} = bumpMap(${valueExpr}, ${scaleExpr});`)
+        const out = { expr: name, kind: 'vec3' as const }
+        cache.set(key, out)
+        return out
+      }
+      if (node.type === 'mxHeightToNormal') {
+        const input = getInput('value')
+        const scaleInput = getInput('scale')
+        const valueExpr = input?.kind === 'number' ? input.expr : 'float(0.0)'
+        const scaleExpr = scaleInput?.kind === 'number' ? scaleInput.expr : 'float(1.0)'
+        const name = nextVar('vec')
+        decls.push(`const ${name} = mx_heighttonormal(${valueExpr}, ${scaleExpr});`)
+        const out = { expr: name, kind: 'vec3' as const }
+        cache.set(key, out)
+        return out
+      }
+
+      if (node.type === 'mxRampLR' || node.type === 'mxRampTB') {
+        const inputA = getInput('a')
+        const inputB = getInput('b')
+        const coord = getInput('coord')
+        const combined = combineTypes(inputA?.kind ?? 'number', inputB?.kind ?? 'number')
+        if (combined === 'unknown') {
+          const out = { expr: 'float(0.0)', kind: 'number' as const }
+          cache.set(key, out)
+          return out
+        }
+        let exprA = inputA?.expr ?? 'float(0.0)'
+        let exprB = inputB?.expr ?? 'float(1.0)'
+        if (combined === 'color') {
+          exprA = inputA?.kind === 'color' ? inputA.expr : inputA?.kind === 'number' ? asColor(inputA.expr, 'number') : 'color(0.0)'
+          exprB = inputB?.kind === 'color' ? inputB.expr : inputB?.kind === 'number' ? asColor(inputB.expr, 'number') : 'color(1.0)'
+        } else if (combined === 'vec3') {
+          exprA = inputA?.kind === 'vec3' ? inputA.expr : inputA?.kind === 'number' ? asVec3(inputA.expr, 'number') : 'vec3(0.0, 0.0, 0.0)'
+          exprB = inputB?.kind === 'vec3' ? inputB.expr : inputB?.kind === 'number' ? asVec3(inputB.expr, 'number') : 'vec3(1.0, 1.0, 1.0)'
+        }
+        const coordExpr = coord ? toVec2Expr(coord) : 'uv()'
+        const fn = node.type === 'mxRampLR' ? 'mx_ramplr' : 'mx_ramptb'
+        const name = nextVar(combined === 'number' ? 'num' : 'col')
+        decls.push(`const ${name} = ${fn}(${exprA}, ${exprB}, ${coordExpr});`)
+        const out = { expr: name, kind: combined }
+        cache.set(key, out)
+        return out
+      }
+      if (node.type === 'mxRamp4') {
+        const tl = getInput('tl')
+        const tr = getInput('tr')
+        const bl = getInput('bl')
+        const br = getInput('br')
+        const coord = getInput('coord')
+        const combined = combineTypes(
+          combineTypes(tl?.kind ?? 'number', tr?.kind ?? 'number'),
+          combineTypes(bl?.kind ?? 'number', br?.kind ?? 'number')
+        )
+        if (combined === 'unknown') {
+          const out = { expr: 'float(0.0)', kind: 'number' as const }
+          cache.set(key, out)
+          return out
+        }
+        const toExpr = (input: ReturnType<typeof getInput>, fallback: string) => {
+          if (!input) return fallback
+          if (input.kind === combined) return input.expr
+          if (input.kind === 'number' && combined === 'color') return asColor(input.expr, 'number')
+          if (input.kind === 'number' && combined === 'vec3') return asVec3(input.expr, 'number')
+          return input.expr
+        }
+        const tlExpr = toExpr(tl, 'float(0.0)')
+        const trExpr = toExpr(tr, 'float(1.0)')
+        const blExpr = toExpr(bl, 'float(0.0)')
+        const brExpr = toExpr(br, 'float(1.0)')
+        const coordExpr = coord ? toVec2Expr(coord) : 'uv()'
+        const name = nextVar(combined === 'number' ? 'num' : 'col')
+        decls.push(`const ${name} = mx_ramp4(${tlExpr}, ${trExpr}, ${blExpr}, ${brExpr}, ${coordExpr});`)
+        const out = { expr: name, kind: combined }
+        cache.set(key, out)
+        return out
+      }
+      if (node.type === 'mxSplitLR' || node.type === 'mxSplitTB') {
+        const inputA = getInput('a')
+        const inputB = getInput('b')
+        const centerInput = getInput('center')
+        const coord = getInput('coord')
+        const combined = combineTypes(inputA?.kind ?? 'number', inputB?.kind ?? 'number')
+        if (combined === 'unknown') {
+          const out = { expr: 'float(0.0)', kind: 'number' as const }
+          cache.set(key, out)
+          return out
+        }
+        let exprA = inputA?.expr ?? 'float(0.0)'
+        let exprB = inputB?.expr ?? 'float(1.0)'
+        if (combined === 'color') {
+          exprA = inputA?.kind === 'color' ? inputA.expr : inputA?.kind === 'number' ? asColor(inputA.expr, 'number') : 'color(0.0)'
+          exprB = inputB?.kind === 'color' ? inputB.expr : inputB?.kind === 'number' ? asColor(inputB.expr, 'number') : 'color(1.0)'
+        } else if (combined === 'vec3') {
+          exprA = inputA?.kind === 'vec3' ? inputA.expr : inputA?.kind === 'number' ? asVec3(inputA.expr, 'number') : 'vec3(0.0, 0.0, 0.0)'
+          exprB = inputB?.kind === 'vec3' ? inputB.expr : inputB?.kind === 'number' ? asVec3(inputB.expr, 'number') : 'vec3(1.0, 1.0, 1.0)'
+        }
+        const centerExpr = centerInput?.kind === 'number' ? centerInput.expr : 'float(0.5)'
+        const coordExpr = coord ? toVec2Expr(coord) : 'uv()'
+        const fn = node.type === 'mxSplitLR' ? 'mx_splitlr' : 'mx_splittb'
+        const name = nextVar(combined === 'number' ? 'num' : 'col')
+        decls.push(`const ${name} = ${fn}(${exprA}, ${exprB}, ${centerExpr}, ${coordExpr});`)
+        const out = { expr: name, kind: combined }
+        cache.set(key, out)
+        return out
+      }
+
+      if (
+        node.type === 'reciprocal' ||
+        node.type === 'cbrt' ||
+        node.type === 'inverseSqrt'
+      ) {
+        const input = getInput('value')
+        if (!input || (!isVectorKind(input.kind) && input.kind !== 'number')) {
+          const out = { expr: 'float(0.0)', kind: 'number' as const }
+          cache.set(key, out)
+          return out
+        }
+        const expr = `${node.type}(${input.expr})`
+        const name = nextVar(input.kind === 'number' ? 'num' : 'vec')
+        decls.push(`const ${name} = ${expr};`)
+        const out = { expr: name, kind: input.kind }
+        cache.set(key, out)
+        return out
+      }
+
+      if (node.type === 'lengthSq') {
+        const input = getInput('value')
+        const valueExpr = input && isVectorKind(input.kind) ? input.expr : 'vec3(0.0, 0.0, 0.0)'
+        const name = nextVar('num')
+        decls.push(`const ${name} = lengthSq(${valueExpr});`)
+        const out = { expr: name, kind: 'number' as const }
+        cache.set(key, out)
+        return out
+      }
+
+      if (node.type === 'difference') {
+        const inputA = getInput('a') ?? { expr: 'float(0.0)', kind: 'number' as const }
+        const inputB = getInput('b') ?? { expr: 'float(0.0)', kind: 'number' as const }
+        const combined = combineTypes(inputA.kind, inputB.kind)
+        if (combined === 'unknown') {
+          const out = { expr: 'float(0.0)', kind: 'number' as const }
+          cache.set(key, out)
+          return out
+        }
+        if (combined === 'number') {
+          const expr = `difference(${inputA.expr}, ${inputB.expr})`
+          const name = nextVar('num')
+          decls.push(`const ${name} = ${expr};`)
+          const out = { expr: name, kind: 'number' as const }
+          cache.set(key, out)
+          return out
+        }
+        let exprA = inputA.expr
+        let exprB = inputB.expr
+        if (combined === 'color') {
+          exprA = inputA.kind === 'color' ? inputA.expr : inputA.kind === 'number' ? asColor(inputA.expr, 'number') : 'color(0.0)'
+          exprB = inputB.kind === 'color' ? inputB.expr : inputB.kind === 'number' ? asColor(inputB.expr, 'number') : 'color(0.0)'
+        } else if (combined === 'vec2') {
+          exprA = inputA.kind === 'vec2' ? inputA.expr : inputA.kind === 'number' ? asVec2(inputA.expr, 'number') : 'vec2(0.0, 0.0)'
+          exprB = inputB.kind === 'vec2' ? inputB.expr : inputB.kind === 'number' ? asVec2(inputB.expr, 'number') : 'vec2(0.0, 0.0)'
+        } else if (combined === 'vec3') {
+          exprA = inputA.kind === 'vec3' ? inputA.expr : inputA.kind === 'number' ? asVec3(inputA.expr, 'number') : 'vec3(0.0, 0.0, 0.0)'
+          exprB = inputB.kind === 'vec3' ? inputB.expr : inputB.kind === 'number' ? asVec3(inputB.expr, 'number') : 'vec3(0.0, 0.0, 0.0)'
+        } else if (combined === 'vec4') {
+          exprA = inputA.kind === 'vec4' ? inputA.expr : inputA.kind === 'number' ? asVec4(inputA.expr, 'number') : 'vec4(0.0, 0.0, 0.0, 1.0)'
+          exprB = inputB.kind === 'vec4' ? inputB.expr : inputB.kind === 'number' ? asVec4(inputB.expr, 'number') : 'vec4(0.0, 0.0, 0.0, 1.0)'
+        }
+        const expr = `difference(${exprA}, ${exprB})`
+        const name = nextVar('vec')
+        decls.push(`const ${name} = ${expr};`)
+        const out = { expr: name, kind: combined }
+        cache.set(key, out)
+        return out
+      }
+
+      if (node.type === 'mxAastep') {
+        const threshold = getInput('threshold')
+        const value = getInput('value')
+        const thresholdExpr = threshold?.kind === 'number' ? threshold.expr : 'float(0.5)'
+        const valueExpr = value?.kind === 'number' ? value.expr : 'float(0.0)'
+        const name = nextVar('num')
+        decls.push(`const ${name} = mx_aastep(${thresholdExpr}, ${valueExpr});`)
+        const out = { expr: name, kind: 'number' as const }
+        cache.set(key, out)
+        return out
+      }
+
+      if (node.type === 'mxSafepower') {
+        const value = getInput('value')
+        const expInput = getInput('exp')
+        const valueExpr = value?.kind === 'number' ? value.expr : 'float(0.0)'
+        const expExpr = expInput?.kind === 'number' ? expInput.expr : 'float(1.0)'
+        const name = nextVar('num')
+        decls.push(`const ${name} = mx_safepower(${valueExpr}, ${expExpr});`)
+        const out = { expr: name, kind: 'number' as const }
+        cache.set(key, out)
+        return out
+      }
+
+      if (node.type === 'shapeCircle') {
+        const uvInput = getInput('uv')
+        const radiusInput = getInput('radius')
+        const uvExpr = toVec2Expr(uvInput ?? { expr: 'uv()', kind: 'vec2' })
+        const radiusExpr = radiusInput?.kind === 'number' ? radiusInput.expr : 'float(0.5)'
+        const name = nextVar('num')
+        decls.push(`const ${name} = shapeCircle(${uvExpr}, ${radiusExpr});`)
+        const out = { expr: name, kind: 'number' as const }
+        cache.set(key, out)
+        return out
+      }
+
+      if (node.type === 'directionToColor' || node.type === 'colorToDirection') {
+        const input = getInput('value')
+        const sourceExpr = input ? toVec3Expr(input) : 'vec3(0.0, 0.0, 0.0)'
+        const fn = node.type
+        const name = nextVar('vec')
+        decls.push(`const ${name} = ${fn}(${sourceExpr});`)
+        const out = { expr: name, kind: 'vec3' as const }
+        cache.set(key, out)
+        return out
+      }
+
+      if (node.type === 'rangeFogFactor') {
+        const nearInput = getInput('near')
+        const farInput = getInput('far')
+        const nearExpr = nearInput?.kind === 'number' ? nearInput.expr : 'float(0.0)'
+        const farExpr = farInput?.kind === 'number' ? farInput.expr : 'float(100.0)'
+        const name = nextVar('num')
+        decls.push(`const ${name} = rangeFogFactor(${nearExpr}, ${farExpr});`)
+        const out = { expr: name, kind: 'number' as const }
+        cache.set(key, out)
+        return out
+      }
+      if (node.type === 'densityFogFactor') {
+        const densityInput = getInput('density')
+        const densityExpr = densityInput?.kind === 'number' ? densityInput.expr : 'float(0.00025)'
+        const name = nextVar('num')
+        decls.push(`const ${name} = densityFogFactor(${densityExpr});`)
+        const out = { expr: name, kind: 'number' as const }
+        cache.set(key, out)
+        return out
+      }
+
       if (node.type === 'material' || node.type === 'physicalMaterial') {
         const pin = outputPin ?? 'baseColor'
         const base = getInput('baseColor')
@@ -12199,7 +13853,7 @@ function App() {
           return out
         }
       }
-      if (node.type === 'basicMaterial') {
+      if (node.type === 'basicMaterial' || node.type === 'toonMaterial' || node.type === 'phongMaterial' || node.type === 'matcapMaterial') {
         const pin = outputPin ?? 'baseColor'
         if (pin === 'baseColor') {
           const base = getInput('baseColor')
@@ -12232,6 +13886,11 @@ function App() {
             return out
           }
         }
+      }
+      if (node.type === 'normalMaterial') {
+        const out = { expr: `color(${FALLBACK_COLOR})`, kind: 'color' as const }
+        cache.set(key, out)
+        return out
       }
 
       if (node.type === 'output') {
@@ -12274,7 +13933,7 @@ function App() {
         : baseColor.kind === 'number'
           ? asColor(baseColor.expr, 'number')
           : 'color(0.067, 0.074, 0.086)'
-    const { standardMaterialNode, physicalMaterialNode, basicMaterialNode } =
+    const { standardMaterialNode, physicalMaterialNode, basicMaterialNode, toonMaterialNode, phongMaterialNode, matcapMaterialNode, normalMaterialNode } =
       getMaterialNodesFromOutput(outputNode, nodeMap, connectionMap)
     const getStandardConn = (pin: string) => {
       const node = standardMaterialNode ?? physicalMaterialNode
@@ -12334,7 +13993,9 @@ function App() {
       if (source?.type === 'texture') return source.id
       return null
     }
-    decls.push(`material.colorNode = ${baseColorExpr};`)
+    if (materialKind !== 'normal') {
+      decls.push(`material.colorNode = ${baseColorExpr};`)
+    }
     if (materialKind === 'standard' || materialKind === 'physical') {
       decls.push(`material.roughnessNode = ${roughness.expr};`)
       decls.push(`material.metalnessNode = ${metalness.expr};`)
@@ -12466,6 +14127,95 @@ function App() {
         getBasicNumberLiteral('reflectivity') ?? getBasicNumberLiteral('envMapIntensity')
       if (reflectivity !== null) {
         decls.push(`material.reflectivity = ${reflectivity.toFixed(3)};`)
+      }
+    }
+    if (materialKind === 'toon' || materialKind === 'phong' || materialKind === 'matcap' || materialKind === 'normal') {
+      const matNode = toonMaterialNode ?? phongMaterialNode ?? matcapMaterialNode ?? normalMaterialNode
+      const getMatConn = (pin: string) =>
+        matNode ? connectionMap.get(`${matNode.id}:${pin}`) : null
+      const getMatNumberExpr = (pin: string) => {
+        const conn = getMatConn(pin)
+        if (!conn) return null
+        const resolved = resolveExpr(conn.from.nodeId, conn.from.pin)
+        return resolved.kind === 'number' ? resolved.expr : null
+      }
+      const getMatNumberLiteral = (pin: string) => {
+        const conn = getMatConn(pin)
+        if (!conn) return null
+        const source = nodeMap.get(conn.from.nodeId)
+        if (source?.type === 'number') {
+          return parseNumber(source.value)
+        }
+        return null
+      }
+      const getMatColorExpr = (pin: string) => {
+        const conn = getMatConn(pin)
+        if (!conn) return null
+        const resolved = resolveExpr(conn.from.nodeId, conn.from.pin)
+        if (resolved.kind === 'color') return resolved.expr
+        if (resolved.kind === 'number') return asColor(resolved.expr, 'number')
+        return null
+      }
+      const getMatTextureId = (pin: string) => {
+        const conn = getMatConn(pin)
+        if (!conn) return null
+        const source = nodeMap.get(conn.from.nodeId)
+        if (source?.type === 'texture') return source.id
+        return null
+      }
+      if (materialKind === 'toon' || materialKind === 'phong') {
+        const emissiveConn = getMatConn('emissive')
+        if (emissiveConn) {
+          const emissiveSource = nodeMap.get(emissiveConn.from.nodeId)
+          if (emissiveSource?.type === 'color') {
+            decls.push(`material.emissive.set('${String(emissiveSource.value ?? '#000000')}');`)
+          }
+        }
+        const emissiveMapId = getMatTextureId('emissiveMap')
+        if (emissiveMapId) {
+          decls.push(`material.emissiveMap = textureFromNode('${emissiveMapId}');`)
+        }
+        const emissiveIntensity = getMatNumberLiteral('emissiveIntensity')
+        if (emissiveIntensity !== null) {
+          decls.push(`material.emissiveIntensity = ${emissiveIntensity.toFixed(3)};`)
+        }
+      }
+      if (materialKind === 'phong') {
+        const specularExpr = getMatColorExpr('specular')
+        if (specularExpr) {
+          decls.push(`material.specularNode = ${specularExpr};`)
+        }
+        const shininessExpr = getMatNumberExpr('shininess')
+        if (shininessExpr) {
+          decls.push(`material.shininessNode = ${shininessExpr};`)
+        }
+      }
+      const normalMapId = getMatTextureId('normalMap')
+      if (normalMapId) {
+        decls.push(`material.normalMap = textureFromNode('${normalMapId}');`)
+      }
+      const normalScale = getMatNumberLiteral('normalScale')
+      if (normalScale !== null) {
+        const value = normalScale.toFixed(3)
+        decls.push(`material.normalScale = new Vector2(${value}, ${value});`)
+      }
+      const opacityExpr = getMatNumberExpr('opacity')
+      if (opacityExpr) {
+        decls.push(`material.opacityNode = ${opacityExpr};`)
+      }
+      const alphaTestExpr = getMatNumberExpr('alphaTest')
+      if (alphaTestExpr) {
+        decls.push(`material.alphaTestNode = ${alphaTestExpr};`)
+      }
+      const alphaHashLiteral = getMatNumberLiteral('alphaHash')
+      if (alphaHashLiteral !== null) {
+        decls.push(`material.alphaHash = ${alphaHashLiteral > 0.5 ? 'true' : 'false'};`)
+      } else if (getMatConn('alphaHash')) {
+        decls.push('material.alphaHash = true;')
+      }
+      const opacityLiteral = getMatNumberLiteral('opacity')
+      if (opacityLiteral !== null) {
+        decls.push(`material.transparent = ${opacityLiteral < 1 ? 'true' : 'false'};`)
       }
     }
     if (vertexOutputNode) {
@@ -12514,2127 +14264,6 @@ function App() {
     return decls.join('\n')
   }
 
-  const buildExecutableTSL = () => {
-    const expanded = expandFunctions(nodes, connections, functions)
-    const nodeMap = buildNodeMap(expanded.nodes)
-    const connectionMap = buildConnectionMap(expanded.connections)
-    const graphNodes = expanded.nodes
-
-    const outputNode = graphNodes.find((node) => node.type === 'output')
-    const vertexOutputNode = graphNodes.find((node) => node.type === 'vertexOutput')
-    if (!outputNode) {
-      return `return new MeshStandardNodeMaterial();`
-    }
-
-    const baseColorConn = getOutputConnection(connectionMap, outputNode, 'baseColor')
-    if (!baseColorConn) {
-      return `return new MeshStandardNodeMaterial();`
-    }
-
-    const materialKind = getMaterialKindFromOutput(outputNode, nodeMap, connectionMap)
-    const materialClass =
-      materialKind === 'basic'
-        ? 'MeshBasicNodeMaterial'
-        : materialKind === 'physical'
-          ? 'MeshPhysicalNodeMaterial'
-          : 'MeshStandardNodeMaterial'
-
-    const tslImportNames = [
-      'acesFilmicToneMapping',
-      'abs',
-      'acos',
-      'agxToneMapping',
-      'asin',
-      'atan',
-      'atan2',
-      'ceil',
-      'checker',
-      'clamp',
-      'cos',
-      'color',
-      'cross',
-      'cineonToneMapping',
-      'dFdx',
-      'dFdy',
-      'degrees',
-      'distance',
-      'dot',
-      'equal',
-      'exp',
-      'exp2',
-      'faceforward',
-      'float',
-      'floor',
-      'fract',
-      'fwidth',
-      'grayscale',
-      'greaterThan',
-      'greaterThanEqual',
-      'inverse',
-      'length',
-      'lessThan',
-      'lessThanEqual',
-      'linearToneMapping',
-      'log',
-      'log2',
-      'luminance',
-      'mat2',
-      'mat3',
-      'mat4',
-      'max',
-      'min',
-      'mix',
-      'mod',
-      'modelWorldMatrix',
-      'modelViewMatrix',
-      'modelNormalMatrix',
-      'mx_fractal_noise_float',
-      'mx_fractal_noise_vec2',
-      'mx_fractal_noise_vec3',
-      'mx_fractal_noise_vec4',
-      'mx_noise_float',
-      'mx_noise_vec3',
-      'mx_noise_vec4',
-      'mx_worley_noise_float',
-      'mx_worley_noise_vec2',
-      'mx_worley_noise_vec3',
-      'negate',
-      'neutralToneMapping',
-      'normalize',
-      'notEqual',
-      'oneMinus',
-      'posterize',
-      'pow',
-      'pow2',
-      'pow3',
-      'pow4',
-      'positionLocal',
-      'normalLocal',
-      'tangentLocal',
-      'bitangentLocal',
-      'cameraProjectionMatrix',
-      'radians',
-      'reinhardToneMapping',
-      'reflect',
-      'refract',
-      'remap',
-      'remapClamp',
-      'rotateUV',
-      'round',
-      'saturate',
-      'sRGBTransferEOTF',
-      'sRGBTransferOETF',
-      'saturation',
-      'select',
-      'sign',
-      'sin',
-      'smoothstep',
-      'smoothstepElement',
-      'spherizeUV',
-      'spritesheetUV',
-      'sqrt',
-      'step',
-      'stepElement',
-      'tan',
-      'texture',
-      'transpose',
-      'triNoise3D',
-      'trunc',
-      'uniform',
-      'uniformTexture',
-      'uv',
-      'vec2',
-      'vec3',
-      'vec4',
-      'cameraViewMatrix',
-    ]
-    const tslImportPlaceholder = '__TSL_IMPORTS__'
-    const decls: string[] = [
-      `const { ${tslImportPlaceholder} } = TSL;`,
-      `const material = new ${materialClass}();`,
-    ]
-    const cache = new Map<string, ExprResult>()
-    let varIndex = 1
-
-    const nextVar = (prefix: string) => `${prefix}_${varIndex++}`
-    const asColor = (expr: string, kind: 'color' | 'number') =>
-      kind === 'color' ? expr : `color(${expr}, ${expr}, ${expr})`
-    const asVec2 = (expr: string, kind: 'vec2' | 'number') =>
-      kind === 'vec2' ? expr : `vec2(${expr}, ${expr})`
-    const asVec3 = (expr: string, kind: 'vec3' | 'number') =>
-      kind === 'vec3' ? expr : `vec3(${expr}, ${expr}, ${expr})`
-    const asVec4 = (expr: string, kind: 'vec4' | 'number') =>
-      kind === 'vec4' ? expr : `vec4(${expr}, ${expr}, ${expr}, ${expr})`
-    const toVec2Expr = (input: ExprResult | null) => {
-      if (!input) return 'vec2(0.0, 0.0)'
-      if (input.kind === 'vec2') return input.expr
-      if (input.kind === 'vec3' || input.kind === 'color') {
-        return `vec2(${input.expr}.x, ${input.expr}.y)`
-      }
-      if (input.kind === 'vec4') {
-        return `vec2(${input.expr}.x, ${input.expr}.y)`
-      }
-      return asVec2(input.expr, 'number')
-    }
-    const toVec3Expr = (input: ExprResult | null) => {
-      if (!input) return 'vec3(0.0, 0.0, 0.0)'
-      if (input.kind === 'vec3' || input.kind === 'color') return input.expr
-      if (input.kind === 'vec2') {
-        return `vec3(${input.expr}.x, ${input.expr}.y, 0.0)`
-      }
-      if (input.kind === 'vec4') {
-        return `vec3(${input.expr}.x, ${input.expr}.y, ${input.expr}.z)`
-      }
-      return asVec3(input.expr, 'number')
-    }
-    const toVec4Expr = (input: ExprResult | null) => {
-      if (!input) return 'vec4(0.0, 0.0, 0.0, 1.0)'
-      if (input.kind === 'vec4') return input.expr
-      if (input.kind === 'vec3' || input.kind === 'color') {
-        return `vec4(${input.expr}.x, ${input.expr}.y, ${input.expr}.z, 1.0)`
-      }
-      if (input.kind === 'vec2') {
-        return `vec4(${input.expr}.x, ${input.expr}.y, 0.0, 1.0)`
-      }
-      return asVec4(input.expr, 'number')
-    }
-
-    const resolveExpr = (nodeId: string, outputPin?: string): ExprResult => {
-      const key = `${nodeId}:${outputPin ?? ''}`
-      const cached = cache.get(key)
-      if (cached) return cached
-
-      const node = nodeMap.get(nodeId)
-      if (!node) {
-        const fallback = { expr: 'float(0.0)', kind: 'number' as const }
-        cache.set(key, fallback)
-        return fallback
-      }
-
-      if (node.type === 'number') {
-        const value = parseNumber(node.value)
-        const name = nextVar('num')
-        const mode = getNumberUpdateMode(node)
-        if (mode === 'manual') {
-          decls.push(`const ${name} = float(${value.toFixed(3)});`)
-        } else {
-          decls.push(`const ${name} = uniform(${value.toFixed(3)});`)
-          appendNumberUniformUpdate(decls, name, node)
-        }
-        const out = { expr: name, kind: 'number' as const }
-        cache.set(key, out)
-        return out
-      }
-
-      if (node.type === 'time') {
-        const out = { expr: 'timeUniform', kind: 'number' as const }
-        cache.set(key, out)
-        return out
-      }
-
-      if (node.type === 'color') {
-        const value = typeof node.value === 'string' ? node.value : DEFAULT_COLOR
-        const name = nextVar('col')
-        decls.push(`const ${name} = color('${value}');`)
-        const out = { expr: name, kind: 'color' as const }
-        cache.set(key, out)
-        return out
-      }
-
-      const attributeExpr = getAttributeExpr(node.type)
-      if (attributeExpr) {
-        cache.set(key, attributeExpr)
-        return attributeExpr
-      }
-
-      if (node.type === 'texture') {
-        const name = nextVar('tex')
-        decls.push(
-          `const ${name} = texture(uniformTexture(textureFromNode('${node.id}')), uv());`,
-        )
-        const out = { expr: name, kind: 'color' as const }
-        cache.set(key, out)
-        return out
-      }
-
-      const getInput = (pin: string) => {
-        const connection = connectionMap.get(`${node.id}:${pin}`)
-        if (!connection) return null
-        return resolveExpr(connection.from.nodeId, connection.from.pin)
-      }
-      if (node.type === 'functionInput' || node.type === 'functionOutput') {
-        const input = getInput('value')
-        const out = input ?? { expr: 'float(0.0)', kind: 'number' as const }
-        cache.set(key, out)
-        return out
-      }
-
-      if (node.type === 'add' || node.type === 'multiply') {
-        const left =
-          getInput('a') ??
-          {
-            expr: node.type === 'add' ? 'float(0.0)' : 'float(1.0)',
-            kind: 'number' as const,
-          }
-        const right =
-          getInput('b') ??
-          {
-            expr: node.type === 'add' ? 'float(0.0)' : 'float(1.0)',
-            kind: 'number' as const,
-          }
-        const op = node.type === 'add' ? 'add' : 'mul'
-        const combined = combineTypes(left.kind, right.kind)
-        if (combined === 'unknown') {
-          const out = { expr: 'float(0.0)', kind: 'number' as const }
-          cache.set(key, out)
-          return out
-        }
-        let leftExpr = left.expr
-        let rightExpr = right.expr
-        if (combined === 'color') {
-          leftExpr = asColor(left.expr, left.kind === 'number' ? 'number' : 'color')
-          rightExpr = asColor(right.expr, right.kind === 'number' ? 'number' : 'color')
-        } else if (combined === 'vec2') {
-          leftExpr = asVec2(left.expr, left.kind === 'number' ? 'number' : 'vec2')
-          rightExpr = asVec2(right.expr, right.kind === 'number' ? 'number' : 'vec2')
-        } else if (combined === 'vec3') {
-          leftExpr = asVec3(left.expr, left.kind === 'number' ? 'number' : 'vec3')
-          rightExpr = asVec3(right.expr, right.kind === 'number' ? 'number' : 'vec3')
-        } else if (combined === 'vec4') {
-          leftExpr = asVec4(left.expr, left.kind === 'number' ? 'number' : 'vec4')
-          rightExpr = asVec4(right.expr, right.kind === 'number' ? 'number' : 'vec4')
-        }
-        const expr = `${leftExpr}.${op}(${rightExpr})`
-        const name = nextVar(combined === 'number' ? 'num' : 'vec')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind: combined }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'ifElse') {
-        const inputCond = getInput('cond')
-        const inputA = getInput('a')
-        const inputB = getInput('b')
-        const inputThreshold = getInput('threshold')
-        const combined = combineTypes(inputA?.kind ?? 'number', inputB?.kind ?? 'number')
-        if (combined === 'unknown' || isMatrixKind(combined)) {
-          const out = { expr: 'float(0.0)', kind: 'number' as const }
-          cache.set(key, out)
-          return out
-        }
-        const outputKind = combined as 'number' | 'color' | 'vec2' | 'vec3' | 'vec4'
-        const toKindExpr = (
-          entry: typeof inputA,
-          kind: 'number' | 'color' | 'vec2' | 'vec3' | 'vec4',
-          fallback: number,
-        ) => {
-          if (kind === 'number') {
-            return entry?.kind === 'number' ? entry.expr : `float(${fallback.toFixed(1)})`
-          }
-          if (entry?.kind === kind) return entry.expr
-          if (entry?.kind === 'number') {
-            if (kind === 'color') return asColor(entry.expr, 'number')
-            if (kind === 'vec2') return asVec2(entry.expr, 'number')
-            if (kind === 'vec3') return asVec3(entry.expr, 'number')
-            return asVec4(entry.expr, 'number')
-          }
-          if (kind === 'color') return `color(${fallback.toFixed(1)})`
-          if (kind === 'vec2') return `vec2(${fallback.toFixed(1)}, ${fallback.toFixed(1)})`
-          if (kind === 'vec3') return `vec3(${fallback.toFixed(1)}, ${fallback.toFixed(1)}, ${fallback.toFixed(1)})`
-          return `vec4(${fallback.toFixed(1)}, ${fallback.toFixed(1)}, ${fallback.toFixed(1)}, ${fallback.toFixed(1)})`
-        }
-        const exprA = toKindExpr(inputA, outputKind, 1)
-        const exprB = toKindExpr(inputB, outputKind, 0)
-        const condExpr = (() => {
-          if (!inputCond) return 'float(0.0)'
-          if (outputKind === 'number') {
-            if (inputCond.kind === 'number') return inputCond.expr
-            if (isVectorKind(inputCond.kind)) return `length(${inputCond.expr})`
-            return 'float(0.0)'
-          }
-          if (outputKind === 'vec2') return toVec2Expr(inputCond)
-          if (outputKind === 'vec4') return toVec4Expr(inputCond)
-          return toVec3Expr(inputCond)
-        })()
-        const thresholdExpr =
-          inputThreshold?.kind === 'number' ? inputThreshold.expr : 'float(0.5)'
-        const thresholdValue =
-          outputKind === 'number'
-            ? thresholdExpr
-            : outputKind === 'vec2'
-              ? `vec2(${thresholdExpr}, ${thresholdExpr})`
-              : outputKind === 'vec4'
-                ? `vec4(${thresholdExpr}, ${thresholdExpr}, ${thresholdExpr}, ${thresholdExpr})`
-                : `vec3(${thresholdExpr}, ${thresholdExpr}, ${thresholdExpr})`
-        const mask = `greaterThan(${condExpr}, ${thresholdValue})`
-        const expr = `select(${mask}, ${exprA}, ${exprB})`
-        const name = nextVar(outputKind === 'number' ? 'num' : outputKind === 'color' ? 'col' : 'vec')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind: outputKind }
-        cache.set(key, out)
-        return out
-      }
-
-      if (node.type === 'sine') {
-        const input = getInput('value')
-        const valueExpr = input?.kind === 'number' ? input.expr : 'float(0.0)'
-        const expr = `sin(${valueExpr})`
-        const name = nextVar('num')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind: 'number' as const }
-        cache.set(key, out)
-        return out
-      }
-      if (
-        node.type === 'tan' ||
-        node.type === 'asin' ||
-        node.type === 'acos' ||
-        node.type === 'atan' ||
-        node.type === 'radians' ||
-        node.type === 'degrees'
-      ) {
-        const input = getInput('value')
-        if (!input || (!isVectorKind(input.kind) && input.kind !== 'number')) {
-          const out = { expr: 'float(0.0)', kind: 'number' as const }
-          cache.set(key, out)
-          return out
-        }
-        const fn =
-          node.type === 'tan'
-            ? 'tan'
-            : node.type === 'asin'
-              ? 'asin'
-              : node.type === 'acos'
-                ? 'acos'
-                : node.type === 'atan'
-                  ? 'atan'
-                  : node.type === 'radians'
-                    ? 'radians'
-                    : 'degrees'
-        const expr = `${fn}(${input.expr})`
-        const name = nextVar(input.kind === 'number' ? 'num' : 'vec')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind: input.kind }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'atan2') {
-        const inputY = getInput('y')
-        const inputX = getInput('x')
-        const kind = resolveVectorOutputKind([
-          inputY?.kind ?? 'number',
-          inputX?.kind ?? 'number',
-        ])
-        if (kind === 'unknown') {
-          const out = { expr: 'float(0.0)', kind: 'number' as const }
-          cache.set(key, out)
-          return out
-        }
-        let exprY = inputY?.expr ?? 'float(0.0)'
-        let exprX = inputX?.expr ?? 'float(0.0)'
-        if (kind === 'color') {
-          exprY =
-            inputY?.kind === 'color'
-              ? inputY.expr
-              : inputY?.kind === 'number'
-                ? asColor(inputY.expr, 'number')
-                : 'color(0.0)'
-          exprX =
-            inputX?.kind === 'color'
-              ? inputX.expr
-              : inputX?.kind === 'number'
-                ? asColor(inputX.expr, 'number')
-                : 'color(0.0)'
-        } else if (kind === 'vec2') {
-          exprY =
-            inputY?.kind === 'vec2'
-              ? inputY.expr
-              : inputY?.kind === 'number'
-                ? asVec2(inputY.expr, 'number')
-                : 'vec2(0.0, 0.0)'
-          exprX =
-            inputX?.kind === 'vec2'
-              ? inputX.expr
-              : inputX?.kind === 'number'
-                ? asVec2(inputX.expr, 'number')
-                : 'vec2(0.0, 0.0)'
-        } else if (kind === 'vec3') {
-          exprY =
-            inputY?.kind === 'vec3'
-              ? inputY.expr
-              : inputY?.kind === 'number'
-                ? asVec3(inputY.expr, 'number')
-                : 'vec3(0.0, 0.0, 0.0)'
-          exprX =
-            inputX?.kind === 'vec3'
-              ? inputX.expr
-              : inputX?.kind === 'number'
-                ? asVec3(inputX.expr, 'number')
-                : 'vec3(0.0, 0.0, 0.0)'
-        } else if (kind === 'vec4') {
-          exprY =
-            inputY?.kind === 'vec4'
-              ? inputY.expr
-              : inputY?.kind === 'number'
-                ? asVec4(inputY.expr, 'number')
-                : 'vec4(0.0, 0.0, 0.0, 1.0)'
-          exprX =
-            inputX?.kind === 'vec4'
-              ? inputX.expr
-              : inputX?.kind === 'number'
-                ? asVec4(inputX.expr, 'number')
-                : 'vec4(0.0, 0.0, 0.0, 1.0)'
-        }
-        const expr = `atan2(${exprY}, ${exprX})`
-        const name = nextVar(kind === 'number' ? 'num' : 'vec')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'vec2') {
-        const inputX = getInput('x')
-        const inputY = getInput('y')
-        const exprX = inputX?.kind === 'number' ? inputX.expr : 'float(0.0)'
-        const exprY = inputY?.kind === 'number' ? inputY.expr : 'float(0.0)'
-        const expr = `vec2(${exprX}, ${exprY})`
-        const name = nextVar('vec')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind: 'vec2' as const }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'mat2') {
-        const c0 = getInput('c0')
-        const c1 = getInput('c1')
-        const expr = `mat2(${toVec2Expr(c0)}, ${toVec2Expr(c1)})`
-        const name = nextVar('mat')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind: 'mat2' as const }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'vec3') {
-        const inputX = getInput('x')
-        const inputY = getInput('y')
-        const inputZ = getInput('z')
-        const exprX = inputX?.kind === 'number' ? inputX.expr : 'float(0.0)'
-        const exprY = inputY?.kind === 'number' ? inputY.expr : 'float(0.0)'
-        const exprZ = inputZ?.kind === 'number' ? inputZ.expr : 'float(0.0)'
-        const expr = `vec3(${exprX}, ${exprY}, ${exprZ})`
-        const name = nextVar('vec')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind: 'vec3' as const }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'mat3') {
-        const c0 = getInput('c0')
-        const c1 = getInput('c1')
-        const c2 = getInput('c2')
-        const expr = `mat3(${toVec3Expr(c0)}, ${toVec3Expr(c1)}, ${toVec3Expr(c2)})`
-        const name = nextVar('mat')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind: 'mat3' as const }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'scale') {
-        const valueInput = getInput('value')
-        const scaleInput = getInput('scale')
-        const valueExpr =
-          valueInput?.kind === 'vec3'
-            ? valueInput.expr
-            : valueInput?.kind === 'number'
-              ? asVec3(valueInput.expr, 'number')
-              : 'vec3(0.0, 0.0, 0.0)'
-        const scaleExpr =
-          scaleInput?.kind === 'vec3'
-            ? scaleInput.expr
-            : scaleInput?.kind === 'number'
-              ? asVec3(scaleInput.expr, 'number')
-              : 'vec3(1.0, 1.0, 1.0)'
-        const expr = `(${valueExpr} * ${scaleExpr})`
-        const name = nextVar('vec')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind: 'vec3' as const }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'rotate') {
-        const valueInput = getInput('value')
-        const rotationInput = getInput('rotation')
-        const valueExpr =
-          valueInput?.kind === 'vec3'
-            ? valueInput.expr
-            : valueInput?.kind === 'number'
-              ? asVec3(valueInput.expr, 'number')
-              : 'vec3(0.0, 0.0, 0.0)'
-        const rotationExpr =
-          rotationInput?.kind === 'vec3'
-            ? rotationInput.expr
-            : rotationInput?.kind === 'number'
-              ? asVec3(rotationInput.expr, 'number')
-              : 'vec3(0.0, 0.0, 0.0)'
-        const baseName = nextVar('vec')
-        const rotName = nextVar('vec')
-        const cx = nextVar('num')
-        const sx = nextVar('num')
-        const cy = nextVar('num')
-        const sy = nextVar('num')
-        const cz = nextVar('num')
-        const sz = nextVar('num')
-        const rotX = nextVar('vec')
-        const rotY = nextVar('vec')
-        const rotZ = nextVar('vec')
-        decls.push(`const ${baseName} = ${valueExpr};`)
-        decls.push(`const ${rotName} = ${rotationExpr};`)
-        decls.push(`const ${cx} = cos(${rotName}.x);`)
-        decls.push(`const ${sx} = sin(${rotName}.x);`)
-        decls.push(`const ${cy} = cos(${rotName}.y);`)
-        decls.push(`const ${sy} = sin(${rotName}.y);`)
-        decls.push(`const ${cz} = cos(${rotName}.z);`)
-        decls.push(`const ${sz} = sin(${rotName}.z);`)
-        decls.push(
-          `const ${rotX} = vec3(${baseName}.x, ${baseName}.y * ${cx} - ${baseName}.z * ${sx}, ${baseName}.y * ${sx} + ${baseName}.z * ${cx});`,
-        )
-        decls.push(
-          `const ${rotY} = vec3(${rotX}.x * ${cy} + ${rotX}.z * ${sy}, ${rotX}.y, ${rotX}.z * ${cy} - ${rotX}.x * ${sy});`,
-        )
-        decls.push(
-          `const ${rotZ} = vec3(${rotY}.x * ${cz} - ${rotY}.y * ${sz}, ${rotY}.x * ${sz} + ${rotY}.y * ${cz}, ${rotY}.z);`,
-        )
-        const out = { expr: rotZ, kind: 'vec3' as const }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'vec4') {
-        const inputX = getInput('x')
-        const inputY = getInput('y')
-        const inputZ = getInput('z')
-        const inputW = getInput('w')
-        const exprX = inputX?.kind === 'number' ? inputX.expr : 'float(0.0)'
-        const exprY = inputY?.kind === 'number' ? inputY.expr : 'float(0.0)'
-        const exprZ = inputZ?.kind === 'number' ? inputZ.expr : 'float(0.0)'
-        const exprW = inputW?.kind === 'number' ? inputW.expr : 'float(1.0)'
-        const expr = `vec4(${exprX}, ${exprY}, ${exprZ}, ${exprW})`
-        const name = nextVar('vec')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind: 'vec4' as const }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'mat4') {
-        const c0 = getInput('c0')
-        const c1 = getInput('c1')
-        const c2 = getInput('c2')
-        const c3 = getInput('c3')
-        const expr = `mat4(${toVec4Expr(c0)}, ${toVec4Expr(c1)}, ${toVec4Expr(c2)}, ${toVec4Expr(c3)})`
-        const name = nextVar('mat')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind: 'mat4' as const }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'modelMatrix') {
-        const out = { expr: 'modelWorldMatrix', kind: 'mat4' as const }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'viewMatrix') {
-        const out = { expr: 'cameraViewMatrix', kind: 'mat4' as const }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'projectionMatrix') {
-        const out = { expr: 'cameraProjectionMatrix', kind: 'mat4' as const }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'modelViewMatrix') {
-        const out = { expr: 'modelViewMatrix', kind: 'mat4' as const }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'normalMatrix') {
-        const out = { expr: 'modelNormalMatrix', kind: 'mat3' as const }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'transpose' || node.type === 'inverse') {
-        const input = getInput('value')
-        if (!input || !isMatrixKind(input.kind)) {
-          const out = { expr: 'float(0.0)', kind: 'number' as const }
-          cache.set(key, out)
-          return out
-        }
-        const expr = `${node.type}(${input.expr})`
-        const name = nextVar('mat')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind: input.kind }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'splitVec2') {
-        const input = getInput('value')
-        const sourceExpr =
-          input?.kind === 'vec2'
-            ? input.expr
-            : input?.kind === 'number'
-              ? asVec2(input.expr, 'number')
-              : 'vec2(0.0, 0.0)'
-        const channel = outputPin === 'y' ? 'y' : 'x'
-        const expr = `${sourceExpr}.${channel}`
-        const name = nextVar('num')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind: 'number' as const }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'splitVec3') {
-        const input = getInput('value')
-        const sourceExpr =
-          input?.kind === 'vec3'
-            ? input.expr
-            : input?.kind === 'number'
-              ? asVec3(input.expr, 'number')
-              : 'vec3(0.0, 0.0, 0.0)'
-        const channel = outputPin === 'y' ? 'y' : outputPin === 'z' ? 'z' : 'x'
-        const expr = `${sourceExpr}.${channel}`
-        const name = nextVar('num')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind: 'number' as const }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'splitVec4') {
-        const input = getInput('value')
-        const sourceExpr =
-          input?.kind === 'vec4'
-            ? input.expr
-            : input?.kind === 'number'
-              ? asVec4(input.expr, 'number')
-              : 'vec4(0.0, 0.0, 0.0, 1.0)'
-        const channel =
-          outputPin === 'y' ? 'y' : outputPin === 'z' ? 'z' : outputPin === 'w' ? 'w' : 'x'
-        const expr = `${sourceExpr}.${channel}`
-        const name = nextVar('num')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind: 'number' as const }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'cosine') {
-        const input = getInput('value')
-        const valueExpr = input?.kind === 'number' ? input.expr : 'float(0.0)'
-        const expr = `cos(${valueExpr})`
-        const name = nextVar('num')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind: 'number' as const }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'abs') {
-        const input = getInput('value')
-        const valueExpr = input?.kind === 'number' ? input.expr : 'float(0.0)'
-        const expr = `abs(${valueExpr})`
-        const name = nextVar('num')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind: 'number' as const }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'clamp') {
-        const valueInput = getInput('value')
-        const minInput = getInput('min')
-        const maxInput = getInput('max')
-        const valueExpr = valueInput?.kind === 'number' ? valueInput.expr : 'float(0.0)'
-        const minExpr = minInput?.kind === 'number' ? minInput.expr : 'float(0.0)'
-        const maxExpr = maxInput?.kind === 'number' ? maxInput.expr : 'float(1.0)'
-        const expr = `clamp(${valueExpr}, ${minExpr}, ${maxExpr})`
-        const name = nextVar('num')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind: 'number' as const }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'min' || node.type === 'max' || node.type === 'mod') {
-        const inputA = getInput('a') ?? { expr: 'float(0.0)', kind: 'number' as const }
-        const inputB = getInput('b') ?? { expr: 'float(0.0)', kind: 'number' as const }
-        const combined = combineTypes(inputA.kind, inputB.kind)
-        if (combined === 'unknown') {
-          const out = { expr: 'float(0.0)', kind: 'number' as const }
-          cache.set(key, out)
-          return out
-        }
-        const fn = node.type === 'min' ? 'min' : node.type === 'max' ? 'max' : 'mod'
-        if (combined === 'number') {
-          const expr = `${fn}(${inputA.expr}, ${inputB.expr})`
-          const name = nextVar('num')
-          decls.push(`const ${name} = ${expr};`)
-          const out = { expr: name, kind: 'number' as const }
-          cache.set(key, out)
-          return out
-        }
-        let exprA = inputA.expr
-        let exprB = inputB.expr
-        if (combined === 'color') {
-          exprA =
-            inputA.kind === 'color'
-              ? inputA.expr
-              : inputA.kind === 'number'
-                ? asColor(inputA.expr, 'number')
-                : 'color(0.0)'
-          exprB =
-            inputB.kind === 'color'
-              ? inputB.expr
-              : inputB.kind === 'number'
-                ? asColor(inputB.expr, 'number')
-                : 'color(0.0)'
-        } else if (combined === 'vec2') {
-          exprA =
-            inputA.kind === 'vec2'
-              ? inputA.expr
-              : inputA.kind === 'number'
-                ? asVec2(inputA.expr, 'number')
-                : 'vec2(0.0, 0.0)'
-          exprB =
-            inputB.kind === 'vec2'
-              ? inputB.expr
-              : inputB.kind === 'number'
-                ? asVec2(inputB.expr, 'number')
-                : 'vec2(0.0, 0.0)'
-        } else if (combined === 'vec3') {
-          exprA =
-            inputA.kind === 'vec3'
-              ? inputA.expr
-              : inputA.kind === 'number'
-                ? asVec3(inputA.expr, 'number')
-                : 'vec3(0.0, 0.0, 0.0)'
-          exprB =
-            inputB.kind === 'vec3'
-              ? inputB.expr
-              : inputB.kind === 'number'
-                ? asVec3(inputB.expr, 'number')
-                : 'vec3(0.0, 0.0, 0.0)'
-        } else if (combined === 'vec4') {
-          exprA =
-            inputA.kind === 'vec4'
-              ? inputA.expr
-              : inputA.kind === 'number'
-                ? asVec4(inputA.expr, 'number')
-                : 'vec4(0.0, 0.0, 0.0, 1.0)'
-          exprB =
-            inputB.kind === 'vec4'
-              ? inputB.expr
-              : inputB.kind === 'number'
-                ? asVec4(inputB.expr, 'number')
-                : 'vec4(0.0, 0.0, 0.0, 1.0)'
-        }
-        const expr = `${fn}(${exprA}, ${exprB})`
-        const name = nextVar('vec')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind: combined }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'step') {
-        const edgeInput = getInput('edge')
-        const xInput = getInput('x')
-        const kind = resolveVectorOutputKind([
-          edgeInput?.kind ?? 'number',
-          xInput?.kind ?? 'number',
-        ])
-        if (kind === 'unknown') {
-          const out = { expr: 'float(0.0)', kind: 'number' as const }
-          cache.set(key, out)
-          return out
-        }
-        let exprEdge = edgeInput?.expr ?? 'float(0.0)'
-        let exprX = xInput?.expr ?? 'float(0.0)'
-        if (kind === 'color') {
-          exprEdge =
-            edgeInput?.kind === 'color'
-              ? edgeInput.expr
-              : edgeInput?.kind === 'number'
-                ? asColor(edgeInput.expr, 'number')
-                : 'color(0.0)'
-          exprX =
-            xInput?.kind === 'color'
-              ? xInput.expr
-              : xInput?.kind === 'number'
-                ? asColor(xInput.expr, 'number')
-                : 'color(0.0)'
-        } else if (kind === 'vec2') {
-          exprEdge =
-            edgeInput?.kind === 'vec2'
-              ? edgeInput.expr
-              : edgeInput?.kind === 'number'
-                ? asVec2(edgeInput.expr, 'number')
-                : 'vec2(0.0, 0.0)'
-          exprX =
-            xInput?.kind === 'vec2'
-              ? xInput.expr
-              : xInput?.kind === 'number'
-                ? asVec2(xInput.expr, 'number')
-                : 'vec2(0.0, 0.0)'
-        } else if (kind === 'vec3') {
-          exprEdge =
-            edgeInput?.kind === 'vec3'
-              ? edgeInput.expr
-              : edgeInput?.kind === 'number'
-                ? asVec3(edgeInput.expr, 'number')
-                : 'vec3(0.0, 0.0, 0.0)'
-          exprX =
-            xInput?.kind === 'vec3'
-              ? xInput.expr
-              : xInput?.kind === 'number'
-                ? asVec3(xInput.expr, 'number')
-                : 'vec3(0.0, 0.0, 0.0)'
-        } else if (kind === 'vec4') {
-          exprEdge =
-            edgeInput?.kind === 'vec4'
-              ? edgeInput.expr
-              : edgeInput?.kind === 'number'
-                ? asVec4(edgeInput.expr, 'number')
-                : 'vec4(0.0, 0.0, 0.0, 1.0)'
-          exprX =
-            xInput?.kind === 'vec4'
-              ? xInput.expr
-              : xInput?.kind === 'number'
-                ? asVec4(xInput.expr, 'number')
-                : 'vec4(0.0, 0.0, 0.0, 1.0)'
-        }
-        const expr = `step(${exprEdge}, ${exprX})`
-        const name = nextVar(kind === 'number' ? 'num' : 'vec')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind }
-        cache.set(key, out)
-        return out
-      }
-      if (
-        node.type === 'fract' ||
-        node.type === 'floor' ||
-        node.type === 'ceil' ||
-        node.type === 'round' ||
-        node.type === 'trunc' ||
-        node.type === 'exp' ||
-        node.type === 'log' ||
-        node.type === 'sign' ||
-        node.type === 'oneMinus' ||
-        node.type === 'negate' ||
-        node.type === 'exp2' ||
-        node.type === 'log2' ||
-        node.type === 'pow2' ||
-        node.type === 'pow3' ||
-        node.type === 'pow4' ||
-        node.type === 'sqrt' ||
-        node.type === 'saturate'
-      ) {
-        const input = getInput('value')
-        if (!input || (!isVectorKind(input.kind) && input.kind !== 'number')) {
-          const out = { expr: 'float(0.0)', kind: 'number' as const }
-          cache.set(key, out)
-          return out
-        }
-        const fn =
-          node.type === 'fract'
-            ? 'fract'
-            : node.type === 'floor'
-              ? 'floor'
-              : node.type === 'ceil'
-                ? 'ceil'
-                : node.type === 'round'
-                  ? 'round'
-                  : node.type === 'trunc'
-                    ? 'trunc'
-                    : node.type === 'exp'
-                      ? 'exp'
-                      : node.type === 'exp2'
-                        ? 'exp2'
-                        : node.type === 'log'
-                          ? 'log'
-                          : node.type === 'log2'
-                            ? 'log2'
-                            : node.type === 'sign'
-                              ? 'sign'
-                              : node.type === 'oneMinus'
-                                ? 'oneMinus'
-                                : node.type === 'pow2'
-                                  ? 'pow2'
-                                  : node.type === 'pow3'
-                                    ? 'pow3'
-                                    : node.type === 'pow4'
-                                      ? 'pow4'
-                                      : node.type === 'sqrt'
-                                        ? 'sqrt'
-                                        : node.type === 'saturate'
-                                          ? 'saturate'
-                                          : 'negate'
-        const expr = `${fn}(${input.expr})`
-        const name = nextVar(input.kind === 'number' ? 'num' : 'vec')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind: input.kind }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'mix') {
-        const inputA = getInput('a')
-        const inputB = getInput('b')
-        const inputT = getInput('t')
-        const exprT = inputT?.kind === 'number' ? inputT.expr : 'float(0.5)'
-        const typeA = inputA?.kind ?? 'number'
-        const typeB = inputB?.kind ?? 'number'
-        const combined = combineTypes(typeA, typeB)
-        if (combined === 'unknown') {
-          const out = { expr: 'float(0.0)', kind: 'number' as const }
-          cache.set(key, out)
-          return out
-        }
-        let exprA = inputA?.expr ?? 'float(0.0)'
-        let exprB = inputB?.expr ?? 'float(1.0)'
-        if (combined === 'color') {
-          exprA =
-            inputA?.kind === 'color'
-              ? inputA.expr
-              : inputA?.kind === 'number'
-                ? asColor(inputA.expr, 'number')
-                : 'color(0.0)'
-          exprB =
-            inputB?.kind === 'color'
-              ? inputB.expr
-              : inputB?.kind === 'number'
-                ? asColor(inputB.expr, 'number')
-                : 'color(1.0)'
-        } else if (combined === 'vec2') {
-          exprA =
-            inputA?.kind === 'vec2'
-              ? inputA.expr
-              : inputA?.kind === 'number'
-                ? asVec2(inputA.expr, 'number')
-                : 'vec2(0.0, 0.0)'
-          exprB =
-            inputB?.kind === 'vec2'
-              ? inputB.expr
-              : inputB?.kind === 'number'
-                ? asVec2(inputB.expr, 'number')
-                : 'vec2(1.0, 1.0)'
-        } else if (combined === 'vec3') {
-          exprA =
-            inputA?.kind === 'vec3'
-              ? inputA.expr
-              : inputA?.kind === 'number'
-                ? asVec3(inputA.expr, 'number')
-                : 'vec3(0.0, 0.0, 0.0)'
-          exprB =
-            inputB?.kind === 'vec3'
-              ? inputB.expr
-              : inputB?.kind === 'number'
-                ? asVec3(inputB.expr, 'number')
-                : 'vec3(1.0, 1.0, 1.0)'
-        } else if (combined === 'vec4') {
-          exprA =
-            inputA?.kind === 'vec4'
-              ? inputA.expr
-              : inputA?.kind === 'number'
-                ? asVec4(inputA.expr, 'number')
-                : 'vec4(0.0, 0.0, 0.0, 1.0)'
-          exprB =
-            inputB?.kind === 'vec4'
-              ? inputB.expr
-              : inputB?.kind === 'number'
-                ? asVec4(inputB.expr, 'number')
-                : 'vec4(1.0, 1.0, 1.0, 1.0)'
-        } else if (combined === 'number') {
-          exprA = inputA?.kind === 'number' ? inputA.expr : 'float(0.0)'
-          exprB = inputB?.kind === 'number' ? inputB.expr : 'float(1.0)'
-        }
-        const expr = `mix(${exprA}, ${exprB}, ${exprT})`
-        const name = nextVar(combined === 'number' ? 'num' : 'vec')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind: combined }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'smoothstep') {
-        const edge0Input = getInput('edge0')
-        const edge1Input = getInput('edge1')
-        const xInput = getInput('x')
-        const kind = resolveVectorOutputKind([
-          edge0Input?.kind ?? 'number',
-          edge1Input?.kind ?? 'number',
-          xInput?.kind ?? 'number',
-        ])
-        if (kind === 'unknown') {
-          const out = { expr: 'float(0.0)', kind: 'number' as const }
-          cache.set(key, out)
-          return out
-        }
-        let exprEdge0 = edge0Input?.expr ?? 'float(0.0)'
-        let exprEdge1 = edge1Input?.expr ?? 'float(1.0)'
-        let exprX = xInput?.expr ?? 'float(0.0)'
-        if (kind === 'color') {
-          exprEdge0 =
-            edge0Input?.kind === 'color'
-              ? edge0Input.expr
-              : edge0Input?.kind === 'number'
-                ? asColor(edge0Input.expr, 'number')
-                : 'color(0.0)'
-          exprEdge1 =
-            edge1Input?.kind === 'color'
-              ? edge1Input.expr
-              : edge1Input?.kind === 'number'
-                ? asColor(edge1Input.expr, 'number')
-                : 'color(1.0)'
-          exprX =
-            xInput?.kind === 'color'
-              ? xInput.expr
-              : xInput?.kind === 'number'
-                ? asColor(xInput.expr, 'number')
-                : 'color(0.0)'
-        } else if (kind === 'vec2') {
-          exprEdge0 =
-            edge0Input?.kind === 'vec2'
-              ? edge0Input.expr
-              : edge0Input?.kind === 'number'
-                ? asVec2(edge0Input.expr, 'number')
-                : 'vec2(0.0, 0.0)'
-          exprEdge1 =
-            edge1Input?.kind === 'vec2'
-              ? edge1Input.expr
-              : edge1Input?.kind === 'number'
-                ? asVec2(edge1Input.expr, 'number')
-                : 'vec2(1.0, 1.0)'
-          exprX =
-            xInput?.kind === 'vec2'
-              ? xInput.expr
-              : xInput?.kind === 'number'
-                ? asVec2(xInput.expr, 'number')
-                : 'vec2(0.0, 0.0)'
-        } else if (kind === 'vec3') {
-          exprEdge0 =
-            edge0Input?.kind === 'vec3'
-              ? edge0Input.expr
-              : edge0Input?.kind === 'number'
-                ? asVec3(edge0Input.expr, 'number')
-                : 'vec3(0.0, 0.0, 0.0)'
-          exprEdge1 =
-            edge1Input?.kind === 'vec3'
-              ? edge1Input.expr
-              : edge1Input?.kind === 'number'
-                ? asVec3(edge1Input.expr, 'number')
-                : 'vec3(1.0, 1.0, 1.0)'
-          exprX =
-            xInput?.kind === 'vec3'
-              ? xInput.expr
-              : xInput?.kind === 'number'
-                ? asVec3(xInput.expr, 'number')
-                : 'vec3(0.0, 0.0, 0.0)'
-        } else if (kind === 'vec4') {
-          exprEdge0 =
-            edge0Input?.kind === 'vec4'
-              ? edge0Input.expr
-              : edge0Input?.kind === 'number'
-                ? asVec4(edge0Input.expr, 'number')
-                : 'vec4(0.0, 0.0, 0.0, 1.0)'
-          exprEdge1 =
-            edge1Input?.kind === 'vec4'
-              ? edge1Input.expr
-              : edge1Input?.kind === 'number'
-                ? asVec4(edge1Input.expr, 'number')
-                : 'vec4(1.0, 1.0, 1.0, 1.0)'
-          exprX =
-            xInput?.kind === 'vec4'
-              ? xInput.expr
-              : xInput?.kind === 'number'
-                ? asVec4(xInput.expr, 'number')
-                : 'vec4(0.0, 0.0, 0.0, 1.0)'
-        }
-        const expr = `smoothstep(${exprEdge0}, ${exprEdge1}, ${exprX})`
-        const name = nextVar(kind === 'number' ? 'num' : 'vec')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'pow') {
-        const baseInput = getInput('base')
-        const expInput = getInput('exp')
-        const kind = resolveVectorOutputKind([
-          baseInput?.kind ?? 'number',
-          expInput?.kind ?? 'number',
-        ])
-        if (kind === 'unknown') {
-          const out = { expr: 'float(0.0)', kind: 'number' as const }
-          cache.set(key, out)
-          return out
-        }
-        let exprBase = baseInput?.expr ?? 'float(0.0)'
-        let exprExp = expInput?.expr ?? 'float(1.0)'
-        if (kind === 'color') {
-          exprBase =
-            baseInput?.kind === 'color'
-              ? baseInput.expr
-              : baseInput?.kind === 'number'
-                ? asColor(baseInput.expr, 'number')
-                : 'color(0.0)'
-          exprExp =
-            expInput?.kind === 'color'
-              ? expInput.expr
-              : expInput?.kind === 'number'
-                ? asColor(expInput.expr, 'number')
-                : 'color(1.0)'
-        } else if (kind === 'vec2') {
-          exprBase =
-            baseInput?.kind === 'vec2'
-              ? baseInput.expr
-              : baseInput?.kind === 'number'
-                ? asVec2(baseInput.expr, 'number')
-                : 'vec2(0.0, 0.0)'
-          exprExp =
-            expInput?.kind === 'vec2'
-              ? expInput.expr
-              : expInput?.kind === 'number'
-                ? asVec2(expInput.expr, 'number')
-                : 'vec2(1.0, 1.0)'
-        } else if (kind === 'vec3') {
-          exprBase =
-            baseInput?.kind === 'vec3'
-              ? baseInput.expr
-              : baseInput?.kind === 'number'
-                ? asVec3(baseInput.expr, 'number')
-                : 'vec3(0.0, 0.0, 0.0)'
-          exprExp =
-            expInput?.kind === 'vec3'
-              ? expInput.expr
-              : expInput?.kind === 'number'
-                ? asVec3(expInput.expr, 'number')
-                : 'vec3(1.0, 1.0, 1.0)'
-        } else if (kind === 'vec4') {
-          exprBase =
-            baseInput?.kind === 'vec4'
-              ? baseInput.expr
-              : baseInput?.kind === 'number'
-                ? asVec4(baseInput.expr, 'number')
-                : 'vec4(0.0, 0.0, 0.0, 1.0)'
-          exprExp =
-            expInput?.kind === 'vec4'
-              ? expInput.expr
-              : expInput?.kind === 'number'
-                ? asVec4(expInput.expr, 'number')
-                : 'vec4(1.0, 1.0, 1.0, 1.0)'
-        }
-        const expr = `pow(${exprBase}, ${exprExp})`
-        const name = nextVar(kind === 'number' ? 'num' : 'vec')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'length') {
-        const input = getInput('value')
-        const valueExpr =
-          input && isVectorKind(input.kind) ? input.expr : 'vec3(0.0, 0.0, 0.0)'
-        const expr = `length(${valueExpr})`
-        const name = nextVar('num')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind: 'number' as const }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'smoothstepElement') {
-        const lowInput = getInput('low')
-        const highInput = getInput('high')
-        const xInput = getInput('x')
-        const kind = resolveVectorOutputKind([
-          lowInput?.kind ?? 'number',
-          highInput?.kind ?? 'number',
-          xInput?.kind ?? 'number',
-        ])
-        if (kind === 'unknown') {
-          const out = { expr: 'float(0.0)', kind: 'number' as const }
-          cache.set(key, out)
-          return out
-        }
-        let exprX = xInput?.expr ?? 'float(0.0)'
-        let exprLow = lowInput?.expr ?? 'float(0.0)'
-        let exprHigh = highInput?.expr ?? 'float(1.0)'
-        if (kind === 'color') {
-          exprX =
-            xInput?.kind === 'color'
-              ? xInput.expr
-              : xInput?.kind === 'number'
-                ? asColor(xInput.expr, 'number')
-                : 'color(0.0)'
-          exprLow =
-            lowInput?.kind === 'color'
-              ? lowInput.expr
-              : lowInput?.kind === 'number'
-                ? asColor(lowInput.expr, 'number')
-                : 'color(0.0)'
-          exprHigh =
-            highInput?.kind === 'color'
-              ? highInput.expr
-              : highInput?.kind === 'number'
-                ? asColor(highInput.expr, 'number')
-                : 'color(1.0)'
-        } else if (kind === 'vec2') {
-          exprX =
-            xInput?.kind === 'vec2'
-              ? xInput.expr
-              : xInput?.kind === 'number'
-                ? asVec2(xInput.expr, 'number')
-                : 'vec2(0.0, 0.0)'
-          exprLow =
-            lowInput?.kind === 'vec2'
-              ? lowInput.expr
-              : lowInput?.kind === 'number'
-                ? asVec2(lowInput.expr, 'number')
-                : 'vec2(0.0, 0.0)'
-          exprHigh =
-            highInput?.kind === 'vec2'
-              ? highInput.expr
-              : highInput?.kind === 'number'
-                ? asVec2(highInput.expr, 'number')
-                : 'vec2(1.0, 1.0)'
-        } else if (kind === 'vec3') {
-          exprX =
-            xInput?.kind === 'vec3'
-              ? xInput.expr
-              : xInput?.kind === 'number'
-                ? asVec3(xInput.expr, 'number')
-                : 'vec3(0.0, 0.0, 0.0)'
-          exprLow =
-            lowInput?.kind === 'vec3'
-              ? lowInput.expr
-              : lowInput?.kind === 'number'
-                ? asVec3(lowInput.expr, 'number')
-                : 'vec3(0.0, 0.0, 0.0)'
-          exprHigh =
-            highInput?.kind === 'vec3'
-              ? highInput.expr
-              : highInput?.kind === 'number'
-                ? asVec3(highInput.expr, 'number')
-                : 'vec3(1.0, 1.0, 1.0)'
-        } else if (kind === 'vec4') {
-          exprX =
-            xInput?.kind === 'vec4'
-              ? xInput.expr
-              : xInput?.kind === 'number'
-                ? asVec4(xInput.expr, 'number')
-                : 'vec4(0.0, 0.0, 0.0, 1.0)'
-          exprLow =
-            lowInput?.kind === 'vec4'
-              ? lowInput.expr
-              : lowInput?.kind === 'number'
-                ? asVec4(lowInput.expr, 'number')
-                : 'vec4(0.0, 0.0, 0.0, 1.0)'
-          exprHigh =
-            highInput?.kind === 'vec4'
-              ? highInput.expr
-              : highInput?.kind === 'number'
-                ? asVec4(highInput.expr, 'number')
-                : 'vec4(1.0, 1.0, 1.0, 1.0)'
-        }
-        const expr = `smoothstepElement(${exprX}, ${exprLow}, ${exprHigh})`
-        const name = nextVar(kind === 'number' ? 'num' : 'vec')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'stepElement') {
-        const edgeInput = getInput('edge')
-        const xInput = getInput('x')
-        const kind = resolveVectorOutputKind([
-          edgeInput?.kind ?? 'number',
-          xInput?.kind ?? 'number',
-        ])
-        if (kind === 'unknown') {
-          const out = { expr: 'float(0.0)', kind: 'number' as const }
-          cache.set(key, out)
-          return out
-        }
-        let exprX = xInput?.expr ?? 'float(0.0)'
-        let exprEdge = edgeInput?.expr ?? 'float(0.0)'
-        if (kind === 'color') {
-          exprX =
-            xInput?.kind === 'color'
-              ? xInput.expr
-              : xInput?.kind === 'number'
-                ? asColor(xInput.expr, 'number')
-                : 'color(0.0)'
-          exprEdge =
-            edgeInput?.kind === 'color'
-              ? edgeInput.expr
-              : edgeInput?.kind === 'number'
-                ? asColor(edgeInput.expr, 'number')
-                : 'color(0.0)'
-        } else if (kind === 'vec2') {
-          exprX =
-            xInput?.kind === 'vec2'
-              ? xInput.expr
-              : xInput?.kind === 'number'
-                ? asVec2(xInput.expr, 'number')
-                : 'vec2(0.0, 0.0)'
-          exprEdge =
-            edgeInput?.kind === 'vec2'
-              ? edgeInput.expr
-              : edgeInput?.kind === 'number'
-                ? asVec2(edgeInput.expr, 'number')
-                : 'vec2(0.0, 0.0)'
-        } else if (kind === 'vec3') {
-          exprX =
-            xInput?.kind === 'vec3'
-              ? xInput.expr
-              : xInput?.kind === 'number'
-                ? asVec3(xInput.expr, 'number')
-                : 'vec3(0.0, 0.0, 0.0)'
-          exprEdge =
-            edgeInput?.kind === 'vec3'
-              ? edgeInput.expr
-              : edgeInput?.kind === 'number'
-                ? asVec3(edgeInput.expr, 'number')
-                : 'vec3(0.0, 0.0, 0.0)'
-        } else if (kind === 'vec4') {
-          exprX =
-            xInput?.kind === 'vec4'
-              ? xInput.expr
-              : xInput?.kind === 'number'
-                ? asVec4(xInput.expr, 'number')
-                : 'vec4(0.0, 0.0, 0.0, 1.0)'
-          exprEdge =
-            edgeInput?.kind === 'vec4'
-              ? edgeInput.expr
-              : edgeInput?.kind === 'number'
-                ? asVec4(edgeInput.expr, 'number')
-                : 'vec4(0.0, 0.0, 0.0, 1.0)'
-        }
-        const expr = `stepElement(${exprX}, ${exprEdge})`
-        const name = nextVar(kind === 'number' ? 'num' : 'vec')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind }
-        cache.set(key, out)
-        return out
-      }
-      if (
-        node.type === 'lessThan' ||
-        node.type === 'lessThanEqual' ||
-        node.type === 'greaterThan' ||
-        node.type === 'greaterThanEqual' ||
-        node.type === 'equal' ||
-        node.type === 'notEqual'
-      ) {
-        const inputA = getInput('a')
-        const inputB = getInput('b')
-        const kind = resolveVectorOutputKind([
-          inputA?.kind ?? 'number',
-          inputB?.kind ?? 'number',
-        ])
-        if (kind === 'unknown') {
-          const out = { expr: 'float(0.0)', kind: 'number' as const }
-          cache.set(key, out)
-          return out
-        }
-        const compareFn =
-          node.type === 'lessThan'
-            ? 'lessThan'
-            : node.type === 'lessThanEqual'
-              ? 'lessThanEqual'
-              : node.type === 'greaterThan'
-                ? 'greaterThan'
-                : node.type === 'greaterThanEqual'
-                  ? 'greaterThanEqual'
-                  : node.type === 'equal'
-                    ? 'equal'
-                    : 'notEqual'
-        let exprA = inputA?.expr ?? 'float(0.0)'
-        let exprB = inputB?.expr ?? 'float(0.0)'
-        if (kind === 'color') {
-          exprA =
-            inputA?.kind === 'color'
-              ? inputA.expr
-              : inputA?.kind === 'number'
-                ? asColor(inputA.expr, 'number')
-                : 'color(0.0)'
-          exprB =
-            inputB?.kind === 'color'
-              ? inputB.expr
-              : inputB?.kind === 'number'
-                ? asColor(inputB.expr, 'number')
-                : 'color(0.0)'
-        } else if (kind === 'vec2') {
-          exprA =
-            inputA?.kind === 'vec2'
-              ? inputA.expr
-              : inputA?.kind === 'number'
-                ? asVec2(inputA.expr, 'number')
-                : 'vec2(0.0, 0.0)'
-          exprB =
-            inputB?.kind === 'vec2'
-              ? inputB.expr
-              : inputB?.kind === 'number'
-                ? asVec2(inputB.expr, 'number')
-                : 'vec2(0.0, 0.0)'
-        } else if (kind === 'vec3') {
-          exprA =
-            inputA?.kind === 'vec3'
-              ? inputA.expr
-              : inputA?.kind === 'number'
-                ? asVec3(inputA.expr, 'number')
-                : 'vec3(0.0, 0.0, 0.0)'
-          exprB =
-            inputB?.kind === 'vec3'
-              ? inputB.expr
-              : inputB?.kind === 'number'
-                ? asVec3(inputB.expr, 'number')
-                : 'vec3(0.0, 0.0, 0.0)'
-        } else if (kind === 'vec4') {
-          exprA =
-            inputA?.kind === 'vec4'
-              ? inputA.expr
-              : inputA?.kind === 'number'
-                ? asVec4(inputA.expr, 'number')
-                : 'vec4(0.0, 0.0, 0.0, 1.0)'
-          exprB =
-            inputB?.kind === 'vec4'
-              ? inputB.expr
-              : inputB?.kind === 'number'
-                ? asVec4(inputB.expr, 'number')
-                : 'vec4(0.0, 0.0, 0.0, 1.0)'
-        }
-        const oneExpr =
-          kind === 'number'
-            ? 'float(1.0)'
-            : kind === 'color'
-              ? 'color(1.0)'
-              : kind === 'vec2'
-                ? 'vec2(1.0, 1.0)'
-                : kind === 'vec3'
-                  ? 'vec3(1.0, 1.0, 1.0)'
-                  : 'vec4(1.0, 1.0, 1.0, 1.0)'
-        const zeroExpr =
-          kind === 'number'
-            ? 'float(0.0)'
-            : kind === 'color'
-              ? 'color(0.0)'
-              : kind === 'vec2'
-                ? 'vec2(0.0, 0.0)'
-                : kind === 'vec3'
-                  ? 'vec3(0.0, 0.0, 0.0)'
-                  : 'vec4(0.0, 0.0, 0.0, 0.0)'
-        const expr = `select(${compareFn}(${exprA}, ${exprB}), ${oneExpr}, ${zeroExpr})`
-        const name = nextVar(kind === 'number' ? 'num' : kind === 'color' ? 'col' : 'vec')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'and' || node.type === 'or') {
-        const inputA = getInput('a')
-        const inputB = getInput('b')
-        const kind = resolveVectorOutputKind([
-          inputA?.kind ?? 'number',
-          inputB?.kind ?? 'number',
-        ])
-        if (kind === 'unknown') {
-          const out = { expr: 'float(0.0)', kind: 'number' as const }
-          cache.set(key, out)
-          return out
-        }
-        const halfExpr =
-          kind === 'number'
-            ? 'float(0.5)'
-            : kind === 'color'
-              ? 'color(0.5)'
-              : kind === 'vec2'
-                ? 'vec2(0.5, 0.5)'
-                : kind === 'vec3'
-                  ? 'vec3(0.5, 0.5, 0.5)'
-                  : 'vec4(0.5, 0.5, 0.5, 0.5)'
-        let exprA = inputA?.expr ?? 'float(0.0)'
-        let exprB = inputB?.expr ?? 'float(0.0)'
-        if (kind === 'color') {
-          exprA =
-            inputA?.kind === 'color'
-              ? inputA.expr
-              : inputA?.kind === 'number'
-                ? asColor(inputA.expr, 'number')
-                : 'color(0.0)'
-          exprB =
-            inputB?.kind === 'color'
-              ? inputB.expr
-              : inputB?.kind === 'number'
-                ? asColor(inputB.expr, 'number')
-                : 'color(0.0)'
-        } else if (kind === 'vec2') {
-          exprA =
-            inputA?.kind === 'vec2'
-              ? inputA.expr
-              : inputA?.kind === 'number'
-                ? asVec2(inputA.expr, 'number')
-                : 'vec2(0.0, 0.0)'
-          exprB =
-            inputB?.kind === 'vec2'
-              ? inputB.expr
-              : inputB?.kind === 'number'
-                ? asVec2(inputB.expr, 'number')
-                : 'vec2(0.0, 0.0)'
-        } else if (kind === 'vec3') {
-          exprA =
-            inputA?.kind === 'vec3'
-              ? inputA.expr
-              : inputA?.kind === 'number'
-                ? asVec3(inputA.expr, 'number')
-                : 'vec3(0.0, 0.0, 0.0)'
-          exprB =
-            inputB?.kind === 'vec3'
-              ? inputB.expr
-              : inputB?.kind === 'number'
-                ? asVec3(inputB.expr, 'number')
-                : 'vec3(0.0, 0.0, 0.0)'
-        } else if (kind === 'vec4') {
-          exprA =
-            inputA?.kind === 'vec4'
-              ? inputA.expr
-              : inputA?.kind === 'number'
-                ? asVec4(inputA.expr, 'number')
-                : 'vec4(0.0, 0.0, 0.0, 1.0)'
-          exprB =
-            inputB?.kind === 'vec4'
-              ? inputB.expr
-              : inputB?.kind === 'number'
-                ? asVec4(inputB.expr, 'number')
-                : 'vec4(0.0, 0.0, 0.0, 1.0)'
-        }
-        const maskA = `step(${halfExpr}, ${exprA})`
-        const maskB = `step(${halfExpr}, ${exprB})`
-        const expr = node.type === 'and' ? `(${maskA} * ${maskB})` : `max(${maskA}, ${maskB})`
-        const name = nextVar(kind === 'number' ? 'num' : kind === 'color' ? 'col' : 'vec')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'not') {
-        const input = getInput('value')
-        const kind = input?.kind ?? 'number'
-        if (kind !== 'number' && !isVectorKind(kind)) {
-          const out = { expr: 'float(0.0)', kind: 'number' as const }
-          cache.set(key, out)
-          return out
-        }
-        const halfExpr =
-          kind === 'number'
-            ? 'float(0.5)'
-            : kind === 'color'
-              ? 'color(0.5)'
-              : kind === 'vec2'
-                ? 'vec2(0.5, 0.5)'
-                : kind === 'vec3'
-                  ? 'vec3(0.5, 0.5, 0.5)'
-                  : 'vec4(0.5, 0.5, 0.5, 0.5)'
-        let exprValue = input?.expr ?? 'float(0.0)'
-        if (kind === 'color') {
-          exprValue =
-            input?.kind === 'color'
-              ? input.expr
-              : input?.kind === 'number'
-                ? asColor(input.expr, 'number')
-                : 'color(0.0)'
-        } else if (kind === 'vec2') {
-          exprValue =
-            input?.kind === 'vec2'
-              ? input.expr
-              : input?.kind === 'number'
-                ? asVec2(input.expr, 'number')
-                : 'vec2(0.0, 0.0)'
-        } else if (kind === 'vec3') {
-          exprValue =
-            input?.kind === 'vec3'
-              ? input.expr
-              : input?.kind === 'number'
-                ? asVec3(input.expr, 'number')
-                : 'vec3(0.0, 0.0, 0.0)'
-        } else if (kind === 'vec4') {
-          exprValue =
-            input?.kind === 'vec4'
-              ? input.expr
-              : input?.kind === 'number'
-                ? asVec4(input.expr, 'number')
-                : 'vec4(0.0, 0.0, 0.0, 1.0)'
-        }
-        const mask = `step(${halfExpr}, ${exprValue})`
-        const expr = `oneMinus(${mask})`
-        const name = nextVar(kind === 'number' ? 'num' : kind === 'color' ? 'col' : 'vec')
-        decls.push(`const ${name} = ${expr};`)
-        const out = {
-          expr: name,
-          kind: kind === 'color' ? ('color' as const) : (kind as typeof kind),
-        }
-        cache.set(key, out)
-        return out
-      }
-      if (node.type === 'remap' || node.type === 'remapClamp') {
-        const input = getInput('value')
-        const inLowInput = getInput('inLow')
-        const inHighInput = getInput('inHigh')
-        const outLowInput = getInput('outLow')
-        const outHighInput = getInput('outHigh')
-        const kind = input?.kind ?? 'number'
-        const fn = node.type === 'remap' ? 'remap' : 'remapClamp'
-        if (kind === 'number') {
-          const valueExpr = input?.kind === 'number' ? input.expr : 'float(0.0)'
-          const inLowExpr = inLowInput?.kind === 'number' ? inLowInput.expr : 'float(0.0)'
-          const inHighExpr = inHighInput?.kind === 'number' ? inHighInput.expr : 'float(1.0)'
-          const outLowExpr = outLowInput?.kind === 'number' ? outLowInput.expr : 'float(0.0)'
-          const outHighExpr =
-            outHighInput?.kind === 'number' ? outHighInput.expr : 'float(1.0)'
-          const expr = `${fn}(${valueExpr}, ${inLowExpr}, ${inHighExpr}, ${outLowExpr}, ${outHighExpr})`
-          const name = nextVar('num')
-          decls.push(`const ${name} = ${expr};`)
-          const out = { expr: name, kind: 'number' as const }
-          cache.set(key, out)
-          return out
-        }
-        if (kind === 'vec2') {
-          const valueExpr = input ? toVec2Expr(input) : 'vec2(0.0, 0.0)'
-          const inLowExpr = inLowInput ? toVec2Expr(inLowInput) : 'vec2(0.0, 0.0)'
-          const inHighExpr = inHighInput ? toVec2Expr(inHighInput) : 'vec2(1.0, 1.0)'
-          const outLowExpr = outLowInput ? toVec2Expr(outLowInput) : 'vec2(0.0, 0.0)'
-          const outHighExpr = outHighInput ? toVec2Expr(outHighInput) : 'vec2(1.0, 1.0)'
-          const expr = `${fn}(${valueExpr}, ${inLowExpr}, ${inHighExpr}, ${outLowExpr}, ${outHighExpr})`
-          const name = nextVar('vec')
-          decls.push(`const ${name} = ${expr};`)
-          const out = { expr: name, kind: 'vec2' as const }
-          cache.set(key, out)
-          return out
-        }
-        if (kind === 'vec3' || kind === 'color') {
-          const valueExpr = input ? toVec3Expr(input) : 'vec3(0.0, 0.0, 0.0)'
-          const inLowExpr = inLowInput ? toVec3Expr(inLowInput) : 'vec3(0.0, 0.0, 0.0)'
-          const inHighExpr = inHighInput ? toVec3Expr(inHighInput) : 'vec3(1.0, 1.0, 1.0)'
-          const outLowExpr = outLowInput ? toVec3Expr(outLowInput) : 'vec3(0.0, 0.0, 0.0)'
-          const outHighExpr = outHighInput ? toVec3Expr(outHighInput) : 'vec3(1.0, 1.0, 1.0)'
-          const expr = `${fn}(${valueExpr}, ${inLowExpr}, ${inHighExpr}, ${outLowExpr}, ${outHighExpr})`
-          const name = nextVar('vec')
-          decls.push(`const ${name} = ${expr};`)
-          const out = {
-            expr: name,
-            kind: kind === 'color' ? ('color' as const) : ('vec3' as const),
-          }
-          cache.set(key, out)
-          return out
-        }
-        if (kind === 'vec4') {
-          const valueExpr = input ? toVec4Expr(input) : 'vec4(0.0, 0.0, 0.0, 1.0)'
-          const inLowExpr = inLowInput ? toVec4Expr(inLowInput) : 'vec4(0.0, 0.0, 0.0, 1.0)'
-          const inHighExpr = inHighInput ? toVec4Expr(inHighInput) : 'vec4(1.0, 1.0, 1.0, 1.0)'
-          const outLowExpr = outLowInput ? toVec4Expr(outLowInput) : 'vec4(0.0, 0.0, 0.0, 1.0)'
-          const outHighExpr = outHighInput ? toVec4Expr(outHighInput) : 'vec4(1.0, 1.0, 1.0, 1.0)'
-          const expr = `${fn}(${valueExpr}, ${inLowExpr}, ${inHighExpr}, ${outLowExpr}, ${outHighExpr})`
-          const name = nextVar('vec')
-          decls.push(`const ${name} = ${expr};`)
-          const out = { expr: name, kind: 'vec4' as const }
-          cache.set(key, out)
-          return out
-        }
-      }
-      if (node.type === 'luminance') {
-        const input = getInput('value')
-        const sourceExpr = !input
-          ? 'vec3(0.0, 0.0, 0.0)'
-          : input.kind === 'vec3' || input.kind === 'color'
-            ? input.expr
-            : input.kind === 'vec2'
-              ? `vec3(${input.expr}.x, ${input.expr}.y, 0.0)`
-              : input.kind === 'vec4'
-                ? `vec3(${input.expr}.x, ${input.expr}.y, ${input.expr}.z)`
-                : input.kind === 'number'
-                  ? asVec3(input.expr, 'number')
-                  : 'vec3(0.0, 0.0, 0.0)'
-        const expr = `luminance(${sourceExpr})`
-        const name = nextVar('num')
-        decls.push(`const ${name} = ${expr};`)
-        const out = { expr: name, kind: 'number' as const }
-        cache.set(key, out)
-        return out
-      }
-      if (
-        node.type === 'grayscale' ||
-        node.type === 'saturation' ||
-        node.type === 'posterize' ||
-        node.type === 'sRGBTransferEOTF' ||
-        node.type === 'sRGBTransferOETF' ||
-        node.type === 'linearToneMapping' ||
-        node.type === 'reinhardToneMapping' ||
-        node.type === 'cineonToneMapping' ||
-        node.type === 'acesFilmicToneMapping' ||
-        node.type === 'agxToneMapping' ||
-        node.type === 'neutralToneMapping'
-      ) {
-        const input = getInput('value')
-        const sourceExpr = !input
-          ? 'vec3(0.0, 0.0, 0.0)'
-          : input.kind === 'vec3' || input.kind === 'color'
-            ? input.expr
-            : input.kind === 'vec2'
-              ? `vec3(${input.expr}.x, ${input.expr}.y, 0.0)`
-              : input.kind === 'vec4'
-                ? `vec3(${input.expr}.x, ${input.expr}.y, ${input.expr}.z)`
-                : input.kind === 'number'
-                  ? asVec3(input.expr, 'number')
-                  : 'vec3(0.0, 0.0, 0.0)'
-        let expr = sourceExpr
-        if (node.type === 'grayscale') {
-          expr = `grayscale(${sourceExpr})`
-        } else if (node.type === 'saturation') {
-          const amountInput = getInput('amount')
-          const amountExpr = amountInput?.kind === 'number' ? amountInput.expr : 'float(1.0)'
-          expr = `saturation(${sourceExpr}, ${amountExpr})`
-        } else if (node.type === 'posterize') {
-          const stepsInput = getInput('steps')
-          const stepsExpr = stepsInput?.kind === 'number' ? stepsInput.expr : 'float(4.0)'
-          expr = `posterize(${sourceExpr}, ${stepsExpr})`
-        } else if (node.type === 'sRGBTransferEOTF') {
-          expr = `sRGBTransferEOTF(${sourceExpr})`
-        } else if (node.type === 'sRGBTransferOETF') {
-          expr = `sRGBTransferOETF(${sourceExpr})`
-        } else if (node.type === 'linearToneMapping') {
-          expr = `linearToneMapping(${sourceExpr}, float(1))`
-        } else if (node.type === 'reinhardToneMapping') {
-          expr = `reinhardToneMapping(${sourceExpr}, float(1))`
-        } else if (node.type === 'cineonToneMapping') {
-          expr = `cineonToneMapping(${sourceExpr}, float(1))`
-        } else if (node.type === 'acesFilmicToneMapping') {
-          expr = `acesFilmicToneMapping(${sourceExpr}, float(1))`
-        } else if (node.type === 'agxToneMapping') {
-          expr = `agxToneMapping(${sourceExpr}, float(1))`
-        } else {
-          expr = `neutralToneMapping(${sourceExpr}, float(1))`
-        }
-        const name = nextVar('col')
-        decls.push(`const ${name} = ${expr};`)
-        const kind = input?.kind === 'color' || !input ? ('color' as const) : ('vec3' as const)
-        const out = { expr: name, kind }
-        cache.set(key, out)
-        return out
-      }
-
-      if (node.type === 'material' || node.type === 'physicalMaterial') {
-        const pin = outputPin ?? 'baseColor'
-        const base = getInput('baseColor')
-        const tex = getInput('baseColorTexture')
-        if (pin === 'baseColor') {
-          if (base && tex) {
-            const expr = `${asColor(base.expr, base.kind === 'number' ? 'number' : 'color')}.mul(${asColor(
-              tex.expr,
-              tex.kind === 'number' ? 'number' : 'color',
-            )})`
-            const name = nextVar('col')
-            decls.push(`const ${name} = ${expr};`)
-            const out = { expr: name, kind: 'color' as const }
-            cache.set(key, out)
-            return out
-          }
-          if (base) {
-            const out = {
-              expr: asColor(base.expr, base.kind === 'number' ? 'number' : 'color'),
-              kind: 'color' as const,
-            }
-            cache.set(key, out)
-            return out
-          }
-          if (tex) {
-            const out = {
-              expr: asColor(tex.expr, tex.kind === 'number' ? 'number' : 'color'),
-              kind: 'color' as const,
-            }
-            cache.set(key, out)
-            return out
-          }
-        }
-        if (pin === 'roughness' || pin === 'metalness') {
-          const input = getInput(pin)
-          const out = input ?? { expr: 'float(0.7)', kind: 'number' as const }
-          cache.set(key, out)
-          return out
-        }
-      }
-
-      if (node.type === 'output') {
-        const input = getInput('baseColor')
-        const out =
-          input?.kind === 'color'
-            ? { expr: input.expr, kind: 'color' as const }
-            : input?.kind === 'number'
-              ? { expr: asColor(input.expr, 'number'), kind: 'color' as const }
-              : { expr: `color(${FALLBACK_COLOR})`, kind: 'color' as const }
-        cache.set(key, out)
-        return out
-      }
-
-      if (node.type === 'vertexOutput') {
-        const input = getInput('position')
-        const out =
-          input?.kind === 'vec3'
-            ? { expr: input.expr, kind: 'vec3' as const }
-            : input?.kind === 'number'
-              ? { expr: asVec3(input.expr, 'number'), kind: 'vec3' as const }
-              : { expr: 'vec3(0.0, 0.0, 0.0)', kind: 'vec3' as const }
-        cache.set(key, out)
-        return out
-      }
-
-      const fallback = { expr: 'float(0.0)', kind: 'number' as const }
-      cache.set(key, fallback)
-      return fallback
-    }
-
-    const baseColor = resolveExpr(baseColorConn.from.nodeId, baseColorConn.from.pin)
-    const roughnessConn = getOutputConnection(connectionMap, outputNode, 'roughness')
-    const metalnessConn = getOutputConnection(connectionMap, outputNode, 'metalness')
-    const roughness = roughnessConn
-      ? resolveExpr(roughnessConn.from.nodeId, roughnessConn.from.pin)
-      : { expr: 'float(0.7)', kind: 'number' as const }
-    const metalness = metalnessConn
-      ? resolveExpr(metalnessConn.from.nodeId, metalnessConn.from.pin)
-      : { expr: 'float(0.1)', kind: 'number' as const }
-
-    const baseColorExpr =
-      baseColor.kind === 'color'
-        ? baseColor.expr
-        : baseColor.kind === 'number'
-          ? asColor(baseColor.expr, 'number')
-          : `color(${FALLBACK_COLOR})`
-    const { standardMaterialNode, physicalMaterialNode, basicMaterialNode } =
-      getMaterialNodesFromOutput(outputNode, nodeMap, connectionMap)
-    const getStandardConn = (pin: string) => {
-      const node = standardMaterialNode ?? physicalMaterialNode
-      return node ? connectionMap.get(`${node.id}:${pin}`) : null
-    }
-    const getStandardNumberExpr = (pin: string) => {
-      const conn = getStandardConn(pin)
-      if (!conn) return null
-      const resolved = resolveExpr(conn.from.nodeId, conn.from.pin)
-      return resolved.kind === 'number' ? resolved.expr : null
-    }
-    const getStandardColorExpr = (pin: string) => {
-      const conn = getStandardConn(pin)
-      if (!conn) return null
-      const resolved = resolveExpr(conn.from.nodeId, conn.from.pin)
-      if (resolved.kind === 'color') return resolved.expr
-      if (resolved.kind === 'number') return asColor(resolved.expr, 'number')
-      return null
-    }
-    const getStandardNumberLiteral = (pin: string) => {
-      const conn = getStandardConn(pin)
-      if (!conn) return null
-      const source = nodeMap.get(conn.from.nodeId)
-      if (source?.type === 'number') {
-        return parseNumber(source.value)
-      }
-      return null
-    }
-    const getStandardTextureId = (pin: string) => {
-      const conn = getStandardConn(pin)
-      if (!conn) return null
-      const source = nodeMap.get(conn.from.nodeId)
-      if (source?.type === 'texture') return source.id
-      return null
-    }
-    const getBasicConn = (pin: string) =>
-      basicMaterialNode ? connectionMap.get(`${basicMaterialNode.id}:${pin}`) : null
-    const getBasicNumberExpr = (pin: string) => {
-      const conn = getBasicConn(pin)
-      if (!conn) return null
-      const resolved = resolveExpr(conn.from.nodeId, conn.from.pin)
-      return resolved.kind === 'number' ? resolved.expr : null
-    }
-    const getBasicNumberLiteral = (pin: string) => {
-      const conn = getBasicConn(pin)
-      if (!conn) return null
-      const source = nodeMap.get(conn.from.nodeId)
-      if (source?.type === 'number') {
-        return parseNumber(source.value)
-      }
-      return null
-    }
-    const getBasicTextureId = (pin: string) => {
-      const conn = getBasicConn(pin)
-      if (!conn) return null
-      const source = nodeMap.get(conn.from.nodeId)
-      if (source?.type === 'texture') return source.id
-      return null
-    }
-    decls.push(`material.colorNode = ${baseColorExpr};`)
-    if (materialKind === 'standard' || materialKind === 'physical') {
-      decls.push(`material.roughnessNode = ${roughness.expr};`)
-      decls.push(`material.metalnessNode = ${metalness.expr};`)
-      if (standardMaterialNode || physicalMaterialNode) {
-        const emissiveExpr = getStandardColorExpr('emissive')
-        if (emissiveExpr) {
-          decls.push(`material.emissiveNode = ${emissiveExpr};`)
-        }
-        const emissiveMapId = getStandardTextureId('emissiveMap')
-        if (emissiveMapId) {
-          decls.push(`material.emissiveMap = textureFromNode('${emissiveMapId}');`)
-        }
-        const emissiveIntensity = getStandardNumberLiteral('emissiveIntensity')
-        if (emissiveIntensity !== null) {
-          decls.push(`material.emissiveIntensity = ${emissiveIntensity.toFixed(3)};`)
-        }
-        const roughnessMapId = getStandardTextureId('roughnessMap')
-        if (roughnessMapId) {
-          decls.push(`material.roughnessMap = textureFromNode('${roughnessMapId}');`)
-        }
-        const metalnessMapId = getStandardTextureId('metalnessMap')
-        if (metalnessMapId) {
-          decls.push(`material.metalnessMap = textureFromNode('${metalnessMapId}');`)
-        }
-        const normalMapId = getStandardTextureId('normalMap')
-        if (normalMapId) {
-          decls.push(`material.normalMap = textureFromNode('${normalMapId}');`)
-        }
-        const normalScale = getStandardNumberLiteral('normalScale')
-        if (normalScale !== null) {
-          const value = normalScale.toFixed(3)
-          decls.push(`material.normalScale = new Vector2(${value}, ${value});`)
-        }
-        const aoMapId = getStandardTextureId('aoMap')
-        if (aoMapId) {
-          decls.push(`material.aoMap = textureFromNode('${aoMapId}');`)
-        }
-        const aoMapIntensity = getStandardNumberLiteral('aoMapIntensity')
-        if (aoMapIntensity !== null) {
-          decls.push(`material.aoMapIntensity = ${aoMapIntensity.toFixed(3)};`)
-        }
-        const envMapId = getStandardTextureId('envMap')
-        if (envMapId) {
-          decls.push(`material.envMap = textureFromNode('${envMapId}');`)
-        }
-        const envMapIntensity = getStandardNumberLiteral('envMapIntensity')
-        if (envMapIntensity !== null) {
-          decls.push(`material.envMapIntensity = ${envMapIntensity.toFixed(3)};`)
-        }
-        const opacityExpr = getStandardNumberExpr('opacity')
-        if (opacityExpr) {
-          decls.push(`material.opacityNode = ${opacityExpr};`)
-        }
-        const alphaTestExpr = getStandardNumberExpr('alphaTest')
-        if (alphaTestExpr) {
-          decls.push(`material.alphaTestNode = ${alphaTestExpr};`)
-        }
-        const alphaHashLiteral = getStandardNumberLiteral('alphaHash')
-        if (alphaHashLiteral !== null) {
-          decls.push(`material.alphaHash = ${alphaHashLiteral > 0.5 ? 'true' : 'false'};`)
-        } else if (getStandardConn('alphaHash')) {
-          decls.push('material.alphaHash = true;')
-        }
-        const opacityLiteral = getStandardNumberLiteral('opacity')
-        if (opacityLiteral !== null) {
-          decls.push(`material.transparent = ${opacityLiteral < 1 ? 'true' : 'false'};`)
-        }
-        if (materialKind === 'physical') {
-          const clearcoatExpr = getStandardNumberExpr('clearcoat')
-          if (clearcoatExpr) {
-            decls.push(`material.clearcoatNode = ${clearcoatExpr};`)
-          }
-          const clearcoatLiteral = getStandardNumberLiteral('clearcoat')
-          if (clearcoatLiteral !== null) {
-            decls.push(`material.clearcoat = ${clearcoatLiteral.toFixed(3)};`)
-          }
-          const clearcoatRoughnessExpr = getStandardNumberExpr('clearcoatRoughness')
-          if (clearcoatRoughnessExpr) {
-            decls.push(`material.clearcoatRoughnessNode = ${clearcoatRoughnessExpr};`)
-          }
-          const clearcoatRoughnessLiteral = getStandardNumberLiteral('clearcoatRoughness')
-          if (clearcoatRoughnessLiteral !== null) {
-            decls.push(
-              `material.clearcoatRoughness = ${clearcoatRoughnessLiteral.toFixed(3)};`,
-            )
-          }
-          const clearcoatNormalId = getStandardTextureId('clearcoatNormal')
-          if (clearcoatNormalId) {
-            decls.push(
-              `material.clearcoatNormalMap = textureFromNode('${clearcoatNormalId}');`,
-            )
-          }
-        }
-      }
-    }
-    if (materialKind === 'basic') {
-      const opacityExpr = getBasicNumberExpr('opacity')
-      if (opacityExpr) {
-        decls.push(`material.opacityNode = ${opacityExpr};`)
-      }
-      const alphaTestExpr = getBasicNumberExpr('alphaTest')
-      if (alphaTestExpr) {
-        decls.push(`material.alphaTestNode = ${alphaTestExpr};`)
-      }
-      const alphaHashLiteral = getBasicNumberLiteral('alphaHash')
-      if (alphaHashLiteral !== null) {
-        decls.push(`material.alphaHash = ${alphaHashLiteral > 0.5 ? 'true' : 'false'};`)
-      } else if (getBasicConn('alphaHash')) {
-        decls.push('material.alphaHash = true;')
-      }
-      const mapId = getBasicTextureId('map')
-      if (mapId) {
-        decls.push(`material.map = textureFromNode('${mapId}');`)
-      }
-      const alphaMapId = getBasicTextureId('alphaMap')
-      if (alphaMapId) {
-        decls.push(`material.alphaMap = textureFromNode('${alphaMapId}');`)
-        decls.push('material.transparent = true;')
-      }
-      const aoMapId = getBasicTextureId('aoMap')
-      if (aoMapId) {
-        decls.push(`material.aoMap = textureFromNode('${aoMapId}');`)
-      }
-      const envMapId = getBasicTextureId('envMap')
-      if (envMapId) {
-        decls.push(`material.envMap = textureFromNode('${envMapId}');`)
-      }
-      const reflectivity =
-        getBasicNumberLiteral('reflectivity') ?? getBasicNumberLiteral('envMapIntensity')
-      if (reflectivity !== null) {
-        decls.push(`material.reflectivity = ${reflectivity.toFixed(3)};`)
-      }
-    }
-    if (vertexOutputNode) {
-      const positionConn = connectionMap.get(`${vertexOutputNode.id}:position`)
-      if (positionConn) {
-        const positionValue = resolveExpr(
-          positionConn.from.nodeId,
-          positionConn.from.pin,
-        )
-        const positionExpr =
-          positionValue.kind === 'vec3'
-            ? positionValue.expr
-            : positionValue.kind === 'number'
-              ? asVec3(positionValue.expr, 'number')
-              : 'vec3(0.0, 0.0, 0.0)'
-        decls.push(`material.positionNode = positionLocal.add(${positionExpr});`)
-      } else {
-        decls.push('material.positionNode = positionLocal;')
-      }
-    }
-
-    decls.push('return material;')
-    const code = decls.join('\n')
-    const usedImports = tslImportNames.filter((name) => {
-      const regex = new RegExp(`\\b${name}\\b`, 'g')
-      return regex.test(code)
-    })
-    const importLine = usedImports.length
-      ? `const { ${usedImports.join(', ')} } = TSL;`
-      : ''
-    return code
-      .replace(`const { ${tslImportPlaceholder} } = TSL;`, importLine)
-      .replace(/\n{3,}/g, '\n\n')
-      .trim()
-  }
-
   const buildMaterialExport = (
     code: string,
     format: 'js' | 'ts',
@@ -14677,12 +14306,20 @@ function App() {
     const needsBasic = code.includes('MeshBasicNodeMaterial')
     const needsStandard = code.includes('MeshStandardNodeMaterial')
     const needsPhysical = code.includes('MeshPhysicalNodeMaterial')
+    const needsToon = code.includes('MeshToonNodeMaterial')
+    const needsPhong = code.includes('MeshPhongNodeMaterial')
+    const needsMatcap = code.includes('MeshMatcapNodeMaterial')
+    const needsNormal = code.includes('MeshNormalNodeMaterial')
     const needsVector2 = code.includes('new Vector2')
     const usesTextures = allTextureIds.length > 0
     const materialImports = [
       needsBasic ? 'MeshBasicNodeMaterial' : null,
       needsStandard ? 'MeshStandardNodeMaterial' : null,
       needsPhysical ? 'MeshPhysicalNodeMaterial' : null,
+      needsToon ? 'MeshToonNodeMaterial' : null,
+      needsPhong ? 'MeshPhongNodeMaterial' : null,
+      needsMatcap ? 'MeshMatcapNodeMaterial' : null,
+      needsNormal ? 'MeshNormalNodeMaterial' : null,
     ].filter(Boolean)
     const materialReturnType = materialImports.length
       ? materialImports.join(' | ')
@@ -14946,7 +14583,7 @@ function App() {
     codePreviewRef.current = buildCodePreview()
   }, [graphComputeSignature])
 
-  const executableTSL = useMemo(() => buildExecutableTSL(), [graphComputeSignature])
+  const executableTSL = useMemo(() => buildExecutableTSLFromCodegen(nodes, connections, functions), [graphComputeSignature])
   const materialExport = useMemo(
     () => buildMaterialExport(executableTSL, exportFormat, 'module'),
     [graphComputeSignature, executableTSL, exportFormat],
@@ -15004,6 +14641,26 @@ function App() {
         return executableTSL
     }
   }, [tslOutputKind, materialExport, appExport, executableTSL, gltfOutputText])
+
+  const currentGraph = useMemo<TSLNodeEditorGraph>(
+    () => ({
+      nodes,
+      connections,
+      groups,
+      functions,
+      ui: { paletteOpen },
+    }),
+    [nodes, connections, groups, functions, paletteOpen],
+  )
+
+  useEffect(() => {
+    onChange?.({
+      tslCode: executableTSL,
+      materialCode: materialExport,
+      appCode: appExport,
+      graph: currentGraph,
+    })
+  }, [executableTSL, materialExport, appExport, currentGraph, onChange])
 
   useEffect(() => {
     if (tslOutputKind !== 'gltf') return
@@ -15126,7 +14783,7 @@ function App() {
     const handleMessage = (event: MessageEvent) => {
       const data = event.data as { type?: string; message?: string }
       if (data?.type === 'tsl-viewer-error' && data.message) {
-        setToast(`Viewer error: ${data.message}`)
+        toast.error(`Viewer error: ${data.message}`)
       } else if (data?.type === 'tsl-viewer-ready') {
         setViewerReadyTick((prev) => prev + 1)
       }
@@ -15160,9 +14817,9 @@ function App() {
   const copyTSLExport = useCallback(async () => {
     try {
       await navigator.clipboard.writeText(tslOutput)
-      setToast('TSL export copied')
+      toast.success('TSL export copied')
     } catch {
-      setToast('Failed to copy TSL export')
+      toast.error('Failed to copy TSL export')
     }
   }, [tslOutput])
 
@@ -15181,7 +14838,7 @@ function App() {
     link.download = `${baseName}.${suffix}`
     link.click()
     URL.revokeObjectURL(url)
-    setToast('TSL export downloaded')
+    toast.success('TSL export downloaded')
   }, [exportFormat, tslOutput, tslOutputKind])
 
   const downloadGltfExport = useCallback(() => {
@@ -15189,7 +14846,7 @@ function App() {
     const scene = new Scene()
     const meshes = meshesRef.current
     if (!meshes.length) {
-      setToast('No mesh to export')
+      toast.error('No mesh to export')
       return
     }
     const rawMaterial = meshes[0]?.material
@@ -15235,7 +14892,7 @@ function App() {
           link.download = 'tsl-node-editor.glb'
           link.click()
           URL.revokeObjectURL(url)
-          setToast('glTF export downloaded')
+          toast.success('glTF export downloaded')
           return
         }
         const data = JSON.stringify(result, null, 2)
@@ -15246,11 +14903,11 @@ function App() {
         link.download = 'tsl-node-editor.gltf'
         link.click()
         URL.revokeObjectURL(url)
-        setToast('glTF export downloaded')
+        toast.success('glTF export downloaded')
       },
       (error) => {
         const message = error instanceof Error ? error.message : 'Unknown glTF error'
-        setToast(`glTF export failed: ${message}`)
+        toast.error(`glTF export failed: ${message}`)
       },
       { binary: true },
     )
@@ -15275,22 +14932,29 @@ function App() {
     const expanded = expandFunctions(nodes, connections, functions)
     const meshes = meshesRef.current
     let material = materialRef.current
-    const needsBasic = materialKind === 'basic'
-    const needsPhysical = materialKind === 'physical'
-    const needsStandard = materialKind === 'standard'
+    const materialClassForKind: Record<string, new () => MeshStandardNodeMaterial | MeshPhysicalNodeMaterial | MeshBasicNodeMaterial | MeshToonNodeMaterial | MeshPhongNodeMaterial | MeshMatcapNodeMaterial | MeshNormalNodeMaterial> = {
+      basic: MeshBasicNodeMaterial,
+      physical: MeshPhysicalNodeMaterial,
+      toon: MeshToonNodeMaterial,
+      phong: MeshPhongNodeMaterial,
+      matcap: MeshMatcapNodeMaterial,
+      normal: MeshNormalNodeMaterial,
+    }
+    const materialInstanceCheck: Record<string, (m: unknown) => boolean> = {
+      basic: (m) => m instanceof MeshBasicNodeMaterial,
+      physical: (m) => m instanceof MeshPhysicalNodeMaterial,
+      standard: (m) => m instanceof MeshStandardNodeMaterial && !(m instanceof MeshPhysicalNodeMaterial),
+      toon: (m) => m instanceof MeshToonNodeMaterial,
+      phong: (m) => m instanceof MeshPhongNodeMaterial,
+      matcap: (m) => m instanceof MeshMatcapNodeMaterial,
+      normal: (m) => m instanceof MeshNormalNodeMaterial,
+    }
     const needsSwap =
-      !material ||
-      (needsBasic && !(material instanceof MeshBasicNodeMaterial)) ||
-      (needsPhysical && !(material instanceof MeshPhysicalNodeMaterial)) ||
-      (needsStandard && !(material instanceof MeshStandardNodeMaterial))
+      !material || !(materialInstanceCheck[materialKind]?.(material) ?? false)
     let materialChanged = false
     if (needsSwap) {
-      const nextMaterial = needsBasic
-        ? new MeshBasicNodeMaterial()
-        : needsPhysical
-          ? new MeshPhysicalNodeMaterial()
-          : new MeshStandardNodeMaterial()
-      material?.dispose()
+      const MaterialClass = materialClassForKind[materialKind] ?? MeshStandardNodeMaterial
+      const nextMaterial = new MaterialClass()
       material = nextMaterial
       materialRef.current = nextMaterial
       meshes.forEach((mesh) => {
@@ -15302,7 +14966,9 @@ function App() {
     const signatureChanged = graphSignatureRef.current !== graphSignature
     const textureChanged = textureSignatureRef.current !== textureSignature
     if (signatureChanged || textureChanged || materialChanged) {
-      material.colorNode = root
+      if (!(material instanceof MeshNormalNodeMaterial)) {
+        material.colorNode = root
+      }
       if (material instanceof MeshStandardNodeMaterial) {
         if (roughnessNode?.kind === 'number') {
           material.roughnessNode = roughnessNode.node
@@ -15461,6 +15127,82 @@ function App() {
         material.reflectivity = reflectivityValue
         const opacityValue = getNumberNodeValue('opacity', 1)
         material.transparent = opacityValue < 1 || Boolean(material.alphaMap)
+      }
+      if (material instanceof MeshToonNodeMaterial || material instanceof MeshPhongNodeMaterial || material instanceof MeshMatcapNodeMaterial || material instanceof MeshNormalNodeMaterial) {
+        const nodeMap = buildNodeMap(expanded.nodes)
+        const connectionMap = buildConnectionMap(expanded.connections)
+        const outputNode = expanded.nodes.find((node) => node.type === 'output')
+        const baseColorConn = outputNode
+          ? connectionMap.get(`${outputNode.id}:baseColor`)
+          : null
+        const matNode = baseColorConn ? nodeMap.get(baseColorConn.from.nodeId) : null
+        const getConn = (pin: string) =>
+          matNode ? connectionMap.get(`${matNode.id}:${pin}`) : null
+        const resolveNumberNode = (pin: string) => {
+          const conn = getConn(pin)
+          if (!conn) return null
+          const resolved = resolveGraphNode(conn.from.nodeId, new Set(), conn.from.pin)
+          return resolved.kind === 'number' ? resolved.node : null
+        }
+        const resolveColorNode = (pin: string) => {
+          const conn = getConn(pin)
+          if (!conn) return null
+          const resolved = resolveGraphNode(conn.from.nodeId, new Set(), conn.from.pin)
+          if (resolved.kind === 'color') return resolved.node
+          if (resolved.kind === 'number') return color(resolved.node)
+          return null
+        }
+        const resolveTextureFromPin = (pin: string) => {
+          const conn = getConn(pin)
+          if (!conn) return null
+          const source = nodeMap.get(conn.from.nodeId)
+          if (source?.type === 'texture') {
+            return textureMapRef.current[source.id]?.texture ?? null
+          }
+          return null
+        }
+        const getNumberLiteral = (pin: string) => {
+          const conn = getConn(pin)
+          if (!conn) return null
+          const source = nodeMap.get(conn.from.nodeId)
+          if (source?.type === 'number') {
+            return parseNumber(source.value)
+          }
+          return null
+        }
+        if (material instanceof MeshToonNodeMaterial || material instanceof MeshPhongNodeMaterial) {
+          const emissiveConn = getConn('emissive')
+          if (emissiveConn) {
+            const source = nodeMap.get(emissiveConn.from.nodeId)
+            if (source?.type === 'color') {
+              material.emissive.set(String(source.value ?? '#000000'))
+            }
+          }
+          material.emissiveMap = resolveTextureFromPin('emissiveMap')
+          const emissiveIntensity = getNumberLiteral('emissiveIntensity')
+          if (emissiveIntensity !== null) {
+            material.emissiveIntensity = emissiveIntensity
+          }
+        }
+        if (material instanceof MeshPhongNodeMaterial) {
+          material.specularNode = resolveColorNode('specular')
+          material.shininessNode = resolveNumberNode('shininess')
+        }
+        material.normalMap = resolveTextureFromPin('normalMap')
+        const normalScaleConn = getConn('normalScale')
+        if (normalScaleConn) {
+          const source = nodeMap.get(normalScaleConn.from.nodeId)
+          if (source?.type === 'number') {
+            const value = parseNumber(source.value)
+            material.normalScale = new Vector2(value, value)
+          }
+        }
+        material.opacityNode = resolveNumberNode('opacity')
+        material.alphaTestNode = resolveNumberNode('alphaTest')
+        const alphaHashValue = getNumberLiteral('alphaHash')
+        material.alphaHash = alphaHashValue !== null ? alphaHashValue > 0.5 : Boolean(getConn('alphaHash'))
+        const opacityValue = getNumberLiteral('opacity')
+        material.transparent = opacityValue !== null ? opacityValue < 1 : false
       }
       if (vertexPositionNode) {
         const positionNode =
@@ -16026,7 +15768,7 @@ function App() {
                 }
               })
               if (!found.length) {
-                setToast('GLTF load failed: no mesh geometry found')
+                toast.error('GLTF load failed: no mesh geometry found')
                 return
               }
               const geometries = found.map((geometry) => geometry.clone())
@@ -16047,7 +15789,7 @@ function App() {
           (error) => {
             const message =
               error instanceof Error ? error.message : 'Unknown GLTF load error'
-            setToast(`GLTF load failed: ${message}`)
+            toast.error(`GLTF load failed: ${message}`)
           },
         )
         changed = true
@@ -16268,6 +16010,14 @@ function App() {
           setLinkDraft(next)
         }
         if (drag) {
+          if (!drag.moved) {
+            const dx = event.clientX - drag.startClientX
+            const dy = event.clientY - drag.startClientY
+            if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+              drag.moved = true
+              isDraggingNodesRef.current = true
+            }
+          }
           if (groupDragRef.current && !groupDragRef.current.moved) {
             const dx = event.clientX - groupDragRef.current.startX
             const dy = event.clientY - groupDragRef.current.startY
@@ -16275,7 +16025,9 @@ function App() {
               groupDragRef.current.moved = true
             }
           }
-          scheduleDragUpdate(event.clientX, event.clientY)
+          if (drag.moved) {
+            scheduleDragUpdate(event.clientX, event.clientY)
+          }
         }
         if (pan) {
           schedulePanUpdate(event.clientX, event.clientY)
@@ -16291,8 +16043,10 @@ function App() {
           window.cancelAnimationFrame(dragRafRef.current)
           dragRafRef.current = null
         }
-        clearDragPreview()
-        commitDragUpdate(event.clientX, event.clientY)
+        if (dragRef.current?.moved) {
+          clearDragPreview()
+          commitDragUpdate(event.clientX, event.clientY)
+        }
         dragPointerRef.current = null
       }
       const draft = linkDraftRef.current
@@ -16400,7 +16154,7 @@ function App() {
                   )
                   const combined = combineTypes(actual, otherType)
                   if (combined === 'unknown') {
-                    setToast('Type mismatch')
+                    toast.error('Type mismatch')
                     linkDraftRef.current = null
                     setLinkDraft(null)
                     dragRef.current = null
@@ -16423,7 +16177,7 @@ function App() {
                   )
                   const combined = combineTypes(actual, otherType)
                   if (combined === 'unknown') {
-                    setToast('Type mismatch')
+                    toast.error('Type mismatch')
                     linkDraftRef.current = null
                     setLinkDraft(null)
                     dragRef.current = null
@@ -16442,7 +16196,7 @@ function App() {
                     new Set(),
                   )
                   if (resolveVectorOutputKind([actual, otherType]) === 'unknown') {
-                    setToast('Type mismatch')
+                    toast.error('Type mismatch')
                     linkDraftRef.current = null
                     setLinkDraft(null)
                     dragRef.current = null
@@ -16471,7 +16225,7 @@ function App() {
                     new Set(),
                   )
                   if (resolveVectorOutputKind([actual, otherType]) === 'unknown') {
-                    setToast('Type mismatch')
+                    toast.error('Type mismatch')
                     linkDraftRef.current = null
                     setLinkDraft(null)
                     dragRef.current = null
@@ -16492,7 +16246,7 @@ function App() {
                   const vecA = getVectorKind(actual)
                   const vecB = getVectorKind(otherType)
                   if (!vecA || !vecB || vecA !== vecB) {
-                    setToast('Type mismatch')
+                    toast.error('Type mismatch')
                     linkDraftRef.current = null
                     setLinkDraft(null)
                     dragRef.current = null
@@ -16514,7 +16268,7 @@ function App() {
                 const yType = pin === 'y' ? actual : resolvePinType('y')
                 const xType = pin === 'x' ? actual : resolvePinType('x')
                 if (resolveVectorOutputKind([yType, xType]) === 'unknown') {
-                  setToast('Type mismatch')
+                  toast.error('Type mismatch')
                   linkDraftRef.current = null
                   setLinkDraft(null)
                   dragRef.current = null
@@ -16535,7 +16289,7 @@ function App() {
                 const edgeType = pin === 'edge' ? actual : resolvePinType('edge')
                 const xType = pin === 'x' ? actual : resolvePinType('x')
                 if (resolveVectorOutputKind([edgeType, xType]) === 'unknown') {
-                  setToast('Type mismatch')
+                  toast.error('Type mismatch')
                   linkDraftRef.current = null
                   setLinkDraft(null)
                   dragRef.current = null
@@ -16556,7 +16310,7 @@ function App() {
                 const edgeType = pin === 'edge' ? actual : resolvePinType('edge')
                 const xType = pin === 'x' ? actual : resolvePinType('x')
                 if (resolveVectorOutputKind([edgeType, xType]) === 'unknown') {
-                  setToast('Type mismatch')
+                  toast.error('Type mismatch')
                   linkDraftRef.current = null
                   setLinkDraft(null)
                   dragRef.current = null
@@ -16575,7 +16329,7 @@ function App() {
                   )
                   const combined = combineTypes(actual, otherType)
                   if (combined === 'unknown') {
-                    setToast('Type mismatch')
+                    toast.error('Type mismatch')
                     linkDraftRef.current = null
                     setLinkDraft(null)
                     dragRef.current = null
@@ -16596,7 +16350,7 @@ function App() {
                     )
                     const combined = combineTypes(actual, otherType)
                     if (combined === 'unknown') {
-                      setToast('Type mismatch')
+                      toast.error('Type mismatch')
                       linkDraftRef.current = null
                       setLinkDraft(null)
                       dragRef.current = null
@@ -16626,7 +16380,7 @@ function App() {
                     : 'number'
                   const outputKind = combineTypes(typeA, typeB)
                   if (outputKind === 'number' && actual !== 'number' && !isVectorKind(actual)) {
-                    setToast('Type mismatch: number expected')
+                    toast.error('Type mismatch: number expected')
                     linkDraftRef.current = null
                     setLinkDraft(null)
                     dragRef.current = null
@@ -16638,7 +16392,7 @@ function App() {
                     resolveVectorOutputKind([actual, outputKind]) === 'unknown' &&
                     actual !== 'number'
                   ) {
-                    setToast('Type mismatch')
+                    toast.error('Type mismatch')
                     linkDraftRef.current = null
                     setLinkDraft(null)
                     dragRef.current = null
@@ -16661,7 +16415,7 @@ function App() {
                 const edge1Type = pin === 'edge1' ? actual : resolvePinType('edge1')
                 const xType = pin === 'x' ? actual : resolvePinType('x')
                 if (resolveVectorOutputKind([edge0Type, edge1Type, xType]) === 'unknown') {
-                  setToast('Type mismatch')
+                  toast.error('Type mismatch')
                   linkDraftRef.current = null
                   setLinkDraft(null)
                   dragRef.current = null
@@ -16683,7 +16437,7 @@ function App() {
                 const highType = pin === 'high' ? actual : resolvePinType('high')
                 const xType = pin === 'x' ? actual : resolvePinType('x')
                 if (resolveVectorOutputKind([lowType, highType, xType]) === 'unknown') {
-                  setToast('Type mismatch')
+                  toast.error('Type mismatch')
                   linkDraftRef.current = null
                   setLinkDraft(null)
                   dragRef.current = null
@@ -16704,7 +16458,7 @@ function App() {
                 const baseType = pin === 'base' ? actual : resolvePinType('base')
                 const expType = pin === 'exp' ? actual : resolvePinType('exp')
                 if (resolveVectorOutputKind([baseType, expType]) === 'unknown') {
-                  setToast('Type mismatch')
+                  toast.error('Type mismatch')
                   linkDraftRef.current = null
                   setLinkDraft(null)
                   dragRef.current = null
@@ -16712,7 +16466,7 @@ function App() {
                 }
               }
               if (!isAssignableType(actual, expected)) {
-                setToast(`Type mismatch: ${expected} expected`)
+                toast.error(`Type mismatch: ${expected} expected`)
                 linkDraftRef.current = null
                 setLinkDraft(null)
                 dragRef.current = null
@@ -16761,10 +16515,12 @@ function App() {
       if (!container.contains(event.target as Node)) return
       const target = event.target as HTMLElement | null
       if (target?.closest('.node-card')) return
+      if (target?.closest('.link-hit')) return
       if (target?.closest('.node-group-header')) return
       if (target?.closest('.node-group-action')) return
       if (event.button !== 0) return
       setSelectedNodeIds([])
+      setSelectedConnectionIds([])
       const viewState = viewRef.current
       panRef.current = {
         startX: event.clientX,
@@ -16906,7 +16662,7 @@ function App() {
       if (!disposed) {
         setStatus('Loading texture support...')
       }
-      const ktx2Loader = new KTX2Loader().setTranscoderPath('/basis/')
+      const ktx2Loader = new KTX2Loader().setTranscoderPath(basisPath)
       ktx2Loader.detectSupport(renderer)
       ktx2LoaderRef.current = ktx2Loader
       setKtx2Ready(true)
@@ -16956,7 +16712,6 @@ function App() {
       disposed = true
       window.removeEventListener('resize', resize)
       renderer?.setAnimationLoop(null)
-      renderer?.dispose()
       ktx2LoaderRef.current?.dispose()
       ktx2LoaderRef.current = null
       rendererRef.current = null
@@ -16965,7 +16720,8 @@ function App() {
       meshesRef.current = []
       geometriesRef.current.forEach((geometry) => geometry.dispose())
       geometriesRef.current = []
-      material?.dispose()
+      materialRef.current = null
+      renderer?.dispose()
       if (renderer?.domElement.parentElement === container) {
         container.removeChild(renderer.domElement)
       }
@@ -16975,17 +16731,19 @@ function App() {
   const displayView = panRef.current ? viewRef.current : view
 
   return (
-    <div className="app">
+    <div className={className ? `app ${className}` : 'app'} style={style}>
       <aside className="sidebar">
         <h1>TSL Node Editor</h1>
-        <a
-          className="project-link"
-          href="https://github.com/takahirox/tsl-node-editor"
-          target="_blank"
-          rel="noreferrer"
-        >
-          GitHub Project
-        </a>
+        {!hideGithubLink && (
+          <a
+            className="project-link"
+            href="https://github.com/takahirox/tsl-node-editor"
+            target="_blank"
+            rel="noreferrer"
+          >
+            GitHub Project
+          </a>
+        )}
         <div className="status">
           <div className="dot" />
           {status}
@@ -17170,6 +16928,30 @@ function App() {
             ))}
           </div>
         </section>
+        {presets && presets.length > 0 && (
+        <section className="panel">
+          <h2>Presets</h2>
+          <div className="preset-list">
+            {presets.map((preset, index) => (
+              <button
+                key={index}
+                className="preset-button"
+                type="button"
+                disabled={loadingPresetIndex !== null}
+                onClick={() => void handleLoadPreset(preset, index)}
+              >
+                <span className="preset-name">{preset.name}</span>
+                {preset.description && (
+                  <span className="preset-description">{preset.description}</span>
+                )}
+                {loadingPresetIndex === index && (
+                  <span className="preset-loading">Loading...</span>
+                )}
+              </button>
+            ))}
+          </div>
+        </section>
+        )}
         <section className="panel">
           <h2>Overlay</h2>
           <div className="button-row">
@@ -17224,6 +17006,7 @@ function App() {
             </button>
           </div>
         </section>
+        {!disablePersistence && (
         <section className="panel">
           <h2>Storage</h2>
           <div className="slot-row">
@@ -17279,7 +17062,7 @@ function App() {
                 setGroups([])
                 setFunctions({})
                 setSelectedNodeIds([])
-                setToast(`Cleared slot "${target}"`)
+                toast.success(`Cleared slot "${target}"`)
               }}
             >
               Clear Slot
@@ -17346,11 +17129,14 @@ function App() {
             </button>
           </div>
         </section>
+        )}
       </aside>
       <main className="viewport" ref={viewportRef}>
         <div className="viewport-label">Preview</div>
         <div className="node-canvas">
-          {toast ? <div className="toast">{toast}</div> : null}
+          <div className="passive-toaster">
+            <Toaster position="top-right" theme="dark" />
+          </div>
           {showCode ? (
             <div
               className="code-overlay"
@@ -17462,7 +17248,7 @@ function App() {
                   <iframe
                     ref={viewerRef}
                     className="viewer-frame"
-                    src={`${import.meta.env.BASE_URL}viewer.html`}
+                    src={viewerUrl ?? `${import.meta.env.BASE_URL}viewer.html`}
                     title="TSL Viewer"
                   />
                 </div>
@@ -17495,16 +17281,41 @@ function App() {
                   const path = `M ${from.x} ${from.y} C ${
                     from.x + dx
                   } ${from.y}, ${to.x - dx} ${to.y}, ${to.x} ${to.y}`
+                  const isSelected = selectedConnectionIds.includes(link.id)
                   return (
-                    <path
-                      key={link.id}
-                      d={path}
-                      data-link-id={link.id}
-                      data-from-node-id={link.from.nodeId}
-                      data-to-node-id={link.to.nodeId}
-                      data-from-pin={link.from.pin}
-                      data-to-pin={link.to.pin}
-                    />
+                    <g key={link.id}>
+                      <path
+                        className="link-hit"
+                        d={path}
+                        data-link-id={link.id}
+                        data-from-node-id={link.from.nodeId}
+                        data-to-node-id={link.to.nodeId}
+                        data-from-pin={link.from.pin}
+                        data-to-pin={link.to.pin}
+                        onPointerDown={(event) => {
+                          event.preventDefault()
+                          event.stopPropagation()
+                          setSelectedNodeIds([])
+                          setSelectedConnectionIds((prev) => {
+                            if (event.shiftKey) {
+                              return prev.includes(link.id)
+                                ? prev.filter((id) => id !== link.id)
+                                : [...prev, link.id]
+                            }
+                            return prev.includes(link.id) ? prev : [link.id]
+                          })
+                        }}
+                      />
+                      <path
+                        className={`link-stroke${isSelected ? ' selected' : ''}`}
+                        d={path}
+                        data-link-id={link.id}
+                        data-from-node-id={link.from.nodeId}
+                        data-to-node-id={link.to.nodeId}
+                        data-from-pin={link.from.pin}
+                        data-to-pin={link.to.pin}
+                      />
+                    </g>
                   )
                 })}
                 {linkDraft ? (
@@ -17590,9 +17401,11 @@ function App() {
                         dragRef.current = {
                           ids: group.nodeIds,
                           offsets,
+                          startClientX: event.clientX,
+                          startClientY: event.clientY,
+                          moved: false,
                           elements,
                         }
-                        isDraggingNodesRef.current = true
                       }}
                       onClick={(event) => {
                         event.stopPropagation()
@@ -17732,6 +17545,7 @@ function App() {
                         }
                         event.preventDefault()
                         event.stopPropagation()
+                        setSelectedConnectionIds([])
                         setSelectedNodeIds((prev) => {
                           if (event.shiftKey) {
                             return prev.includes(node.id)
@@ -17776,9 +17590,11 @@ function App() {
                         dragRef.current = {
                           ids: selected,
                           offsets,
+                          startClientX: event.clientX,
+                          startClientY: event.clientY,
+                          moved: false,
                           elements,
                         }
-                        isDraggingNodesRef.current = true
                       }}
                     >
               <div className={`node-header${node.type === 'function' ? ' node-header-function' : ''}`}>
@@ -17798,7 +17614,7 @@ function App() {
                       onClick={(event) => {
                         event.stopPropagation()
                         if (!node.functionId || !functions[node.functionId]) {
-                          setToast('Function not found')
+                          toast.error('Function not found')
                           return
                         }
                         setActiveFunctionId(node.functionId)
@@ -17865,6 +17681,7 @@ function App() {
                         )
                       }
                       setSelectedNodeIds((prev) => prev.filter((id) => id !== node.id))
+                      setSelectedConnectionIds([])
                     }}
                   >
                     Delete
@@ -18444,4 +18261,4 @@ function App() {
   )
 }
 
-export default App
+export default TSLNodeEditor

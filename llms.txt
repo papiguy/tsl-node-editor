@@ -1,0 +1,130 @@
+# TSL Node Editor
+
+> A visual node-graph editor for building Three.js Shading Language (TSL) materials with real-time WebGPU preview and glTF export.
+
+Live demo: https://takahirox.github.io/tsl-node-editor/
+Source: https://github.com/takahirox/tsl-node-editor
+
+## What This Project Does
+
+TSL Node Editor is an embeddable React component that provides a visual node-graph interface for composing Three.js TSL materials. It offers 185+ node types across categories including math, noise, oscillators, gradients, fog, color manipulation, normal mapping, and more. Users connect nodes representing math operations, colors, textures, and other inputs to build shader materials (7 material types) that render in real time via WebGPU. The editor supports exporting to TSL code, material code, full application code (JS/TS), and glTF.
+
+## Tech Stack
+
+- React 19, TypeScript, Vite 7
+- Three.js r182 with WebGPU renderer
+- Three.js Shading Language (TSL) for material composition
+- Vite library mode for the published package
+- npm workspaces monorepo
+
+## Monorepo Structure
+
+- `packages/tsl-node-editor/` — The library package (published as `tsl-node-editor`)
+  - `src/TSLNodeEditor.tsx` — Main editor component (large single-file component)
+  - `src/TSLNodeEditor.css` — Editor styles
+  - `src/viewer.ts` — Standalone WebGPU viewer loaded in an iframe (no React)
+  - `src/tslGltfExporter.ts` — TSL node serialization for glTF export
+  - `src/index.ts` — Public exports
+  - `public/basis/` — KTX2 Basis Universal transcoder assets
+- `examples/basic/` — Minimal demo app using the library
+- `examples/material-editor/` — Advanced demo with scene view and editor overlay
+
+## Library API
+
+### Installation
+
+```bash
+npm install tsl-node-editor
+```
+
+Peer dependencies: react@^19, react-dom@^19, three@^0.182
+
+### Component Usage
+
+```tsx
+import { TSLNodeEditor } from 'tsl-node-editor'
+import 'tsl-node-editor/style.css'
+
+<TSLNodeEditor
+  className="my-editor"
+  style={{ height: '100vh' }}
+  viewerUrl="/viewer.html"
+  basisPath="/basis/"
+  initialGraph={someGraph}
+  disablePersistence
+  onChange={({ tslCode, materialCode, appCode, graph }) => {
+    // Handle output
+  }}
+/>
+```
+
+### Props
+
+- `className?: string` — CSS class for the root element
+- `style?: React.CSSProperties` — Inline styles for the root element
+- `viewerUrl?: string` — URL for the glTF viewer iframe
+- `basisPath?: string` — Path to KTX2 Basis transcoder assets (default: "/basis/")
+- `onChange?: (output: TSLNodeEditorOutput) => void` — Callback when the graph changes
+- `initialGraph?: TSLNodeEditorGraph` — Initial graph state to load on mount
+- `disablePersistence?: boolean` — Disable IndexedDB save/load
+- `hideGithubLink?: boolean` — Hide the GitHub link in the editor UI
+- `presets?: TSLNodeEditorPreset[]` — Custom preset graphs for the presets menu
+
+### Exports
+
+- `TSLNodeEditor` — Main React component
+- `EXAMPLE_GRAPH_PRESET` — Built-in example graph preset (animated torus)
+- `createDefaultNodeSerializer` — Helper for glTF export of TSL nodes
+- `TSLNodeEditorProps` (type) — Component props interface
+- `TSLNodeEditorOutput` (type) — Shape of onChange output: { tslCode, materialCode, appCode, graph }
+- `TSLNodeEditorGraph` (type) — Serializable graph: { nodes, connections, groups?, functions? }
+- `TSLNodeEditorPreset` (type) — Preset definition: { name, description?, graph } or { name, description?, url }
+
+### Viewer Setup
+
+Consuming apps must also serve:
+1. A `viewer.html` page that loads the library's viewer module (WebGPU preview iframe)
+2. Basis Universal transcoder files at the configured `basisPath`
+
+## Architecture
+
+### Core Data Model
+
+- `GraphNode` — Node instance with position, type, I/O pins, and optional values
+- `GraphConnection` — Directed edge between { nodeId, pin } pairs
+- `GraphGroup` — Visual grouping of nodes (collapsible)
+- `FunctionDefinition` — Reusable sub-graph with named input/output pins
+- `ExprKind` / `ExprResult` — Type tracking for TSL expression generation
+- `UniformEntry` — Uniform with update mode (manual/frame/render/object)
+
+### Key Systems
+
+- **Node graph state**: nodes, connections, groups managed via React useState. Connections indexed as Map<"nodeId:pinName", GraphConnection> for O(1) lookup.
+- **TSL code generation**: buildExpr()/buildTslNode() walk the graph recursively from output nodes. Expression kinds (color, number, vec2-4, mat2-4) propagate for type checking.
+- **Material pipeline**: Output node type selects from 7 material types: MeshStandardNodeMaterial, MeshPhysicalNodeMaterial, MeshBasicNodeMaterial, MeshToonNodeMaterial, MeshPhongNodeMaterial, MeshMatcapNodeMaterial, or MeshNormalNodeMaterial.
+- **WebGPU preview**: WebGPURenderer in an iframe, communicates via postMessage. Supports per-frame uniform updates for animation.
+- **Function system**: FunctionDefinition allows reusable sub-graphs. expandFunctions() inlines them during code generation.
+- **Persistence**: IndexedDB (dbName: 'tsl-node-editor') stores named graph slots. Can be disabled with the disablePersistence prop.
+- **History**: Undo/redo stack for node/connection/group state.
+- **Export**: TSL code, material code, full app code (JS/TS), and glTF via @takahirox/gltf-three-materials-tsl-exporter.
+
+### Three.js Import Conventions
+
+- `from 'three/webgpu'` — WebGPU renderer and node materials
+- `from 'three/tsl'` — TSL functions (color, float, vec2, mix, etc.)
+- `from 'three'` — Standard Three.js types (Vector3, Color, etc.)
+
+## Development
+
+```bash
+npm install
+npm run dev       # Start basic example dev server
+npm run build     # Build library then examples
+npm run lint      # ESLint across all packages
+```
+
+Requires Node.js 18+ and a WebGPU-capable browser (Chrome 113+, Edge 113+).
+
+## License
+
+MIT

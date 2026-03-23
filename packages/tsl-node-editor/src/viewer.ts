@@ -14,6 +14,10 @@ import {
   MeshBasicNodeMaterial,
   MeshStandardNodeMaterial,
   MeshPhysicalNodeMaterial,
+  MeshToonNodeMaterial,
+  MeshPhongNodeMaterial,
+  MeshMatcapNodeMaterial,
+  MeshNormalNodeMaterial,
 } from 'three/webgpu'
 import {
   DataTexture,
@@ -137,6 +141,10 @@ const runtime = {
   MeshBasicNodeMaterial,
   MeshStandardNodeMaterial,
   MeshPhysicalNodeMaterial,
+  MeshToonNodeMaterial,
+  MeshPhongNodeMaterial,
+  MeshMatcapNodeMaterial,
+  MeshNormalNodeMaterial,
   SRGBColorSpace,
   NoToneMapping,
   Vector2,

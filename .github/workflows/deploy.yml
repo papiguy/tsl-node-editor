@@ -27,12 +27,14 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
-      - name: Build
-        run: npm run build
+      - name: Build library
+        run: npm run build -w packages/tsl-node-editor
+      - name: Build example
+        run: npm run build -w examples/basic
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: dist
+          path: examples/basic/dist
 
   deploy:
     runs-on: ubuntu-latest

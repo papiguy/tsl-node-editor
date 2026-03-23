@@ -1,7 +1,8 @@
 {
   "files": [],
   "references": [
-    { "path": "./tsconfig.app.json" },
-    { "path": "./tsconfig.node.json" }
+    { "path": "./packages/tsl-node-editor" },
+    { "path": "./examples/basic" },
+    { "path": "./examples/material-editor" }
   ]
 }

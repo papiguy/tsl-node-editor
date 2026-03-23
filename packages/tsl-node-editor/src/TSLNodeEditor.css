@@ -409,18 +409,7 @@
   background: rgba(40, 80, 120, 0.35);
 }
 
-.toast {
-  position: absolute;
-  top: 20px;
-  right: 20px;
-  padding: 10px 14px;
-  border-radius: 12px;
-  background: rgba(12, 16, 22, 0.9);
-  border: 1px solid rgba(255, 123, 87, 0.6);
-  color: rgba(255, 200, 180, 0.95);
-  font-size: 0.8rem;
-  z-index: 4;
-}
+
 
 .viewport {
   position: relative;
@@ -452,10 +441,16 @@
   touch-action: none;
 }
 
+.passive-toaster > div > div > div > div > button:last-child {
+  display: none !important;
+  pointer-events: none !important;
+}
+
 .node-world {
   position: absolute;
   inset: 0;
   transform-origin: 0 0;
+  pointer-events: none;
 }
 
 .node-group {
@@ -540,20 +535,38 @@
   inset: 0;
   width: 100%;
   height: 100%;
-  pointer-events: none;
+  pointer-events: auto;
   overflow: visible;
 }
 
-.node-links path {
+.node-links path.link-stroke {
   fill: none;
   stroke: rgba(120, 190, 255, 0.7);
   stroke-width: 2;
   vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+
+.node-links path.link-stroke.selected {
+  stroke: rgba(255, 214, 102, 0.95);
+  stroke-width: 3;
+}
+
+.node-links path.link-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 14;
+  vector-effect: non-scaling-stroke;
+  pointer-events: stroke;
+  cursor: pointer;
 }
 
 .node-links path.draft {
+  fill: none;
   stroke: rgba(255, 200, 120, 0.7);
+  stroke-width: 2;
   stroke-dasharray: 6 6;
+  vector-effect: non-scaling-stroke;
 }
 
 .node-stack-title {
@@ -877,6 +890,52 @@
 .node-input[type='color'] {
   padding: 4px;
   height: 32px;
+}
+
+.preset-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.preset-button {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(16, 22, 30, 0.9);
+  color: #dfe7ef;
+  padding: 10px 12px;
+  text-align: left;
+  font-size: 0.9rem;
+  border-radius: 10px;
+  transition: border-color 0.2s, transform 0.2s;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.preset-button:hover {
+  border-color: rgba(122, 189, 255, 0.7);
+  transform: translateY(-1px);
+}
+
+.preset-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.preset-name {
+  font-weight: 500;
+}
+
+.preset-description {
+  font-size: 0.75rem;
+  color: rgba(223, 231, 239, 0.5);
+  line-height: 1.3;
+}
+
+.preset-loading {
+  font-size: 0.75rem;
+  color: rgba(122, 189, 255, 0.8);
 }
 
 @media (max-width: 860px) {
