@@ -600,6 +600,7 @@
 .node-card {
   position: absolute;
   width: 200px;
+  box-sizing: border-box;
   padding: 10px;
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.1);
@@ -753,6 +754,7 @@
   gap: 6px;
   font-size: 0.75rem;
   color: rgba(223, 231, 239, 0.8);
+  min-width: 0;
 }
 
 .node-input-group {
@@ -833,6 +835,7 @@
   margin-top: 10px;
   display: grid;
   gap: 6px;
+  min-width: 0;
 }
 
 .node-control-label {
@@ -844,6 +847,9 @@
 
 .node-input {
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   padding: 6px 8px;
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.15);
