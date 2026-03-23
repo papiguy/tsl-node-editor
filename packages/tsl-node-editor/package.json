@@ -4,7 +4,7 @@
   "description": "Node-based editor for building Three.js TSL materials with WebGPU preview and export.",
   "type": "module",
   "license": "MIT",
-  "author": "Takahiro",
+  "author": "Takahiro & Nitin Khanna",
   "main": "./dist/tsl-node-editor.js",
   "module": "./dist/tsl-node-editor.js",
   "types": "./dist/index.d.ts",

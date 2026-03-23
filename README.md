@@ -59,20 +59,24 @@ tsl-node-editor/
 ### Install
 
 ```bash
-npm install tsl-node-editor
+npm install tsl-node-editor react react-dom three
 ```
 
-Peer dependencies: `react@^19`, `react-dom@^19`, `three@^0.182`
+`react`, `react-dom`, and `three` are peer dependencies. They stay in the consuming app and are not bundled into the library.
 
 ### Basic Usage
 
 ```tsx
+import { StrictMode } from 'react'
+import { createRoot } from 'react-dom/client'
 import { TSLNodeEditor } from 'tsl-node-editor'
 import 'tsl-node-editor/style.css'
 
-function App() {
-  return <TSLNodeEditor />
-}
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <TSLNodeEditor />
+  </StrictMode>,
+)
 ```
 
 ### With Options
