@@ -7,11 +7,11 @@
   "author": "Takahiro & Nitin Khanna",
   "main": "./dist/tsl-node-editor.js",
   "module": "./dist/tsl-node-editor.js",
-  "types": "./dist/index.d.ts",
+  "types": "./dist/src/index.d.ts",
   "exports": {
     ".": {
       "import": "./dist/tsl-node-editor.js",
-      "types": "./dist/index.d.ts"
+      "types": "./dist/src/index.d.ts"
     },
     "./style.css": "./dist/tsl-node-editor.css",
     "./viewer": {

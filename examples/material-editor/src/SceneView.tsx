@@ -12,6 +12,10 @@ import {
   MeshBasicNodeMaterial,
   MeshStandardNodeMaterial,
   MeshPhysicalNodeMaterial,
+  MeshToonNodeMaterial,
+  MeshPhongNodeMaterial,
+  MeshMatcapNodeMaterial,
+  MeshNormalNodeMaterial,
 } from 'three/webgpu'
 import { Raycaster, SRGBColorSpace, NoToneMapping } from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
@@ -85,13 +89,27 @@ export default function SceneView({ materialCode, onEditMaterial }: SceneViewPro
         MeshBasicNodeMaterial,
         MeshStandardNodeMaterial,
         MeshPhysicalNodeMaterial,
+        MeshToonNodeMaterial,
+        MeshPhongNodeMaterial,
+        MeshMatcapNodeMaterial,
+        MeshNormalNodeMaterial,
         Vector2,
       }
 
       const fn = new Function(
         'runtime',
         [
-          'const { TSL, MeshBasicNodeMaterial, MeshStandardNodeMaterial, MeshPhysicalNodeMaterial, Vector2 } = runtime;',
+          'const {',
+          '  TSL,',
+          '  MeshBasicNodeMaterial,',
+          '  MeshStandardNodeMaterial,',
+          '  MeshPhysicalNodeMaterial,',
+          '  MeshToonNodeMaterial,',
+          '  MeshPhongNodeMaterial,',
+          '  MeshMatcapNodeMaterial,',
+          '  MeshNormalNodeMaterial,',
+          '  Vector2,',
+          '} = runtime;',
           stripped,
           'return makeNodeMaterial();',
         ].join('\n'),
